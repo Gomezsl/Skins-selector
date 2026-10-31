@@ -78,13 +78,15 @@ static void Rescan() {
     std::vector<std::string> rejected;
     skinscan::Scan(g_root, g_skins, &rejected);
     LOGI("%zu skin(s) en %s", g_skins.size(), g_root.c_str());
-    for (auto& k : g_skins) LOGI("  + skin: %s", k.name.c_str());
-    for (auto& r : rejected) LOGI("  - .dff sin chunk de skin (no es ped, se ignora): %s", r.c_str());
+    for (auto& k : g_skins)
+        LOGI("  + skin: %s  [chunk de skin/huesos: %s]%s", k.name.c_str(), k.ped ? "SI" : "NO",
+             k.ped ? "" : "  <- NO es un ped valido: se bloquea (usa !nombre para forzar bajo tu riesgo)");
+    LOGI("  (%zu .dff sin huesos ignorados: mapa, objetos, armas...)", rejected.size());
     WriteList();
 }
 
 // Debe llamarse en el hilo del juego (lo hacemos desde el hook de CGame::Process).
-static bool ApplySkin(int idx) {
+static bool ApplySkin(int idx, bool force = false) {
     void* ped = FindPlayerPed(-1);
     if (!ped) return false;                       // aun no hay jugador (menu / carga): se reintenta
     if (idx < 0) {                                // volver a CJ
@@ -96,9 +98,16 @@ static bool ApplySkin(int idx) {
     }
     if (idx >= (int)g_skins.size()) return true;
     const std::string& name = g_skins[idx].name;
+    if (!g_skins[idx].ped && !force) {
+        LOGI("skin '%s' bloqueada: el .dff no tiene huesos (no es un ped). Crashearia el juego.", name.c_str());
+        return true;
+    }
+    LOGI("aplicando '%s'...", name.c_str());
     RequestSpecialChar(kSlot, name.c_str(), 0);
     LoadAllRequestedModels(false);
-    if (!HasSpecialCharLoaded(kSlot)) {
+    bool loaded = HasSpecialCharLoaded(kSlot);
+    LOGI("  HasSpecialCharLoaded = %d", (int)loaded);
+    if (!loaded) {
         LOGI("skin '%s' no cargo (mira ZyZModLoader.log: nombre, .dff valido, textura)", name.c_str());
         return true;
     }
@@ -109,25 +118,32 @@ static bool ApplySkin(int idx) {
     return true;
 }
 
+static std::atomic<bool> g_force{false};
+
 static void PollRequestFile() {
     std::string p = g_plugDir + "/request.txt";
+    std::string w = g_plugDir + "/request.working";
     FILE* f = fopen(p.c_str(), "r");
     if (!f) return;
     char buf[128] = {0};
     if (!fgets(buf, sizeof buf, f)) buf[0] = 0;
     fclose(f);
-    unlink(p.c_str());
+    rename(p.c_str(), w.c_str());   // se queda como request.working hasta que la skin se aplique sin crash
     std::string s = buf;
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
     while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    g_force = false;
+    if (!s.empty() && s[0] == '!') { g_force = true; s.erase(s.begin()); }
     std::string l = skinscan::Lower(s);
-    if (l.empty()) return;
+    auto done = [&]() { unlink(w.c_str()); };
+    if (l.empty()) { done(); return; }
     if (l == "cj" || l == "default" || l == "0") { g_pending = -1; return; }
-    if (l == "rescan") { Rescan(); return; }
+    if (l == "rescan") { Rescan(); done(); return; }
     if (l.find_first_not_of("0123456789") == std::string::npos) { g_pending = atoi(l.c_str()) - 1; return; }
     for (size_t i = 0; i < g_skins.size(); i++)
         if (skinscan::Lower(g_skins[i].name) == l) { g_pending = (int)i; return; }
-    LOGI("request: '%s' no es una skin conocida", s.c_str());
+    LOGI("request: '%s' no es una skin conocida (el archivo debe contener solo el nombre, ej: sold)", s.c_str());
+    done();
 }
 
 static void CGame_Process_hook() {
@@ -135,7 +151,10 @@ static void CGame_Process_hook() {
     if (g_frame == 0) LOGI("hook de CGame::Process activo");
     if (++g_frame % 45 == 0) PollRequestFile();
     int p = g_pending.load();
-    if (p != -2 && ApplySkin(p)) g_pending = -2;
+    if (p != -2 && ApplySkin(p, g_force.load())) {
+        g_pending = -2;
+        unlink((g_plugDir + "/request.working").c_str());   // llegamos aqui = no hubo crash
+    }
 }
 
 // ---- menu SAUtils (opcional) --------------------------------------------------------------------
@@ -159,7 +178,15 @@ extern "C" void OnModLoad() {
     g_root = files + "/modloader";
     g_plugDir = files + "/SkinSelector";
     mkdir(g_plugDir.c_str(), 0777);
-    LOGI("== SkinSelector 1.0.1 cargado (OnModLoad) ==");
+    {   // log nuevo en cada inicio; si quedo un request.working, esa skin crasheo el juego
+        std::string w = g_plugDir + "/request.working", c = g_plugDir + "/crashed_request.txt";
+        struct stat st;
+        bool crashed = stat(w.c_str(), &st) == 0;
+        if (crashed) { remove(c.c_str()); rename(w.c_str(), c.c_str()); }
+        FILE* lf = fopen((g_plugDir + "/log.txt").c_str(), "w"); if (lf) fclose(lf);
+        if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
+    }
+    LOGI("== SkinSelector 1.0.2 cargado (OnModLoad) ==");
     LOGI("files: %s", files.c_str());
 
     void* h = aml->GetLibHandle("libGTASA.so");

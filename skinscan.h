@@ -14,6 +14,7 @@ namespace skinscan {
 struct Skin {
     std::string name;  // nombre del .dff sin extension (es el nombre que se pasa a RequestSpecialChar)
     std::string path;  // ruta completa
+    bool ped = false;  // true si el .dff tiene el chunk de skin (huesos), o sea es un ped valido
 };
 
 inline std::string Lower(std::string s) {
@@ -81,10 +82,11 @@ inline void Scan(const std::string& dir, std::vector<Skin>& out, std::vector<std
         } else if (EndsWith(n, ".dff")) {
             std::string base = n.substr(0, n.size() - 4);
             if (base.empty() || base.size() > 23) continue;     // limite del nombre de modelo del juego
-            if (!forced && !IsPedDff(full)) { if (rejected) rejected->push_back(full); continue; }
+            bool ped = IsPedDff(full);
+            if (!forced && !ped) { if (rejected) rejected->push_back(full); continue; }
             bool dup = false;
             for (auto& s : out) if (Lower(s.name) == Lower(base)) { dup = true; break; }
-            if (!dup) out.push_back({base, full});
+            if (!dup) out.push_back({base, full, ped});
         }
     }
     closedir(d);
