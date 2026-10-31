@@ -86,6 +86,8 @@ static void Rescan() {
 }
 
 // Debe llamarse en el hilo del juego (lo hacemos desde el hook de CGame::Process).
+static std::atomic<bool> g_noDelete{false};
+
 static bool ApplySkin(int idx, bool force = false) {
     void* ped = FindPlayerPed(-1);
     if (!ped) return false;                       // aun no hay jugador (menu / carga): se reintenta
@@ -111,8 +113,10 @@ static bool ApplySkin(int idx, bool force = false) {
         LOGI("skin '%s' no cargo (mira ZyZModLoader.log: nombre, .dff valido, textura)", name.c_str());
         return true;
     }
-    if (DeleteRwObject) DeleteRwObject(ped);
+    if (DeleteRwObject && !g_noDelete.load()) { LOGI("  DeleteRwObject(ped=%p)", ped); DeleteRwObject(ped); }
+    LOGI("  SetModelIndex(ped=%p, modelo=%u)", ped, 289u + kSlot);
     SetModelIndex(ped, 289u + kSlot);
+    LOGI("  SetModelIndex termino sin crash");
     SetMissionDoesntRequireSpecialChar(kSlot);
     LOGI("skin: %s", name.c_str());
     return true;
@@ -133,7 +137,11 @@ static void PollRequestFile() {
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
     while (!s.empty() && s.front() == ' ') s.erase(s.begin());
     g_force = false;
-    if (!s.empty() && s[0] == '!') { g_force = true; s.erase(s.begin()); }
+    g_noDelete = false;
+    while (!s.empty() && (s[0] == '!' || s[0] == '~')) {   // ! = forzar, ~ = no llamar DeleteRwObject
+        if (s[0] == '!') g_force = true; else g_noDelete = true;
+        s.erase(s.begin());
+    }
     std::string l = skinscan::Lower(s);
     auto done = [&]() { unlink(w.c_str()); };
     if (l.empty()) { done(); return; }
@@ -186,7 +194,7 @@ extern "C" void OnModLoad() {
         FILE* lf = fopen((g_plugDir + "/log.txt").c_str(), "w"); if (lf) fclose(lf);
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
-    LOGI("== SkinSelector 1.0.2 cargado (OnModLoad) ==");
+    LOGI("== SkinSelector 1.0.3 cargado (OnModLoad) ==");
     LOGI("files: %s", files.c_str());
 
     void* h = aml->GetLibHandle("libGTASA.so");
