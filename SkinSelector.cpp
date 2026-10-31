@@ -115,10 +115,16 @@ static bool ApplySkin(int idx, bool force = false) {
         LOGI("skin '%s' no cargo (mira ZyZModLoader.log: nombre, .dff valido, textura)", name.c_str());
         return true;
     }
-    {   // diagnostico: el juego ya conoce el modelo por su nombre y tiene un clump cargado?
+    unsigned modelId = 289u + kSlot;   // valor por defecto; se corrige con el indice real que devuelve el juego
+    {   // el juego dice en que id registro el modelo (RequestSpecialChar slot 1 -> id 291, no 290)
         int mIdx = -1;
         void* mi = GetModelInfoByName ? GetModelInfoByName(name.c_str(), &mIdx) : nullptr;
-        LOGI("  GetModelInfo('%s') -> %p, indice %d (se esperaba %u)", name.c_str(), mi, mIdx, 289u + kSlot);
+        if (mIdx >= 0) modelId = (unsigned)mIdx;
+        LOGI("  GetModelInfo('%s') -> %p, id real del modelo = %d", name.c_str(), mi, mIdx);
+        if (mIdx >= 0 && (mIdx < 290 || mIdx > 299) && !force) {
+            LOGI("  id fuera del rango de personajes especiales (290-299): no se aplica");
+            return true;
+        }
         if (GetModelInfoByName && !mi && !force) {
             LOGI("  el juego no registro el nombre '%s' como modelo: no se aplica", name.c_str());
             return true;
@@ -129,8 +135,8 @@ static bool ApplySkin(int idx, bool force = false) {
                 LOGI("  modelinfo+%02x: %016llx %016llx %016llx %016llx", i * 8,
                      (unsigned long long)q[i], (unsigned long long)q[i + 1],
                      (unsigned long long)q[i + 2], (unsigned long long)q[i + 3]);
-            void* rw = (void*)q[5];   // CBaseModelInfo::m_pRwObject (offset 0x28 en 64 bits, por confirmar)
-            LOGI("  m_pRwObject (+0x28) = %p", rw);
+            void* rw = (void*)q[8];   // CBaseModelInfo::m_pRwObject: +0x40 en 64 bits (va justo despues del 2000.0 de drawDistance)
+            LOGI("  m_pRwObject (+0x40) = %p", rw);
             if (!rw && !force) {
                 LOGI("  el modelo esta 'cargado' pero no tiene clump: no se aplica (usa !%s para forzar)", name.c_str());
                 return true;
@@ -138,8 +144,8 @@ static bool ApplySkin(int idx, bool force = false) {
         }
     }
     if (DeleteRwObject && !g_noDelete.load()) { LOGI("  DeleteRwObject(ped=%p)", ped); DeleteRwObject(ped); }
-    LOGI("  SetModelIndex(ped=%p, modelo=%u)", ped, 289u + kSlot);
-    SetModelIndex(ped, 289u + kSlot);
+    LOGI("  SetModelIndex(ped=%p, modelo=%u)", ped, modelId);
+    SetModelIndex(ped, modelId);
     LOGI("  SetModelIndex termino sin crash");
     SetMissionDoesntRequireSpecialChar(kSlot);
     LOGI("skin: %s", name.c_str());
@@ -218,7 +224,7 @@ extern "C" void OnModLoad() {
         FILE* lf = fopen((g_plugDir + "/log.txt").c_str(), "w"); if (lf) fclose(lf);
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
-    LOGI("== SkinSelector 1.0.4 cargado (OnModLoad) ==");
+    LOGI("== SkinSelector 1.0.5 cargado (OnModLoad) ==");
     LOGI("files: %s", files.c_str());
 
     void* h = aml->GetLibHandle("libGTASA.so");
