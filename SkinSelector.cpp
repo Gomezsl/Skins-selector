@@ -1,5 +1,6 @@
 // SkinSelector.cpp - plugin AML (arm64, GTA SA 2.10) que lista las skins de modloader/ y se las pone al jugador.
 // ZyZ ModLoader se encarga de cargar el .dff/.txd/.png; este plugin solo detecta cual es una skin y la aplica.
+#include <mod/config.h>
 #include <mod/amlmod.h>
 #include <android/log.h>
 #include <atomic>
