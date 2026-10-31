@@ -1,1 +1,13 @@
-xx
+name: build
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: git clone --depth 1 https://github.com/RusJJ/AndroidModLoader.git AndroidModLoader
+      - run: $ANDROID_NDK_LATEST_HOME/ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk NDK_APPLICATION_MK=Application.mk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libSkinSelector64
+          path: libs/arm64-v8a/*.so
