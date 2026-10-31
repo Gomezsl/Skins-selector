@@ -63,7 +63,8 @@ inline bool IsPedDff(const std::string& path) {
 }
 
 // Recorre dir recursivamente. Una carpeta llamada "Skins" acepta cualquier .dff sin comprobar el chunk de skin.
-inline void Scan(const std::string& dir, std::vector<Skin>& out, int depth = 0, bool forced = false) {
+inline void Scan(const std::string& dir, std::vector<Skin>& out, std::vector<std::string>* rejected = nullptr,
+                 int depth = 0, bool forced = false) {
     DIR* d = opendir(dir.c_str());
     if (!d) return;
     while (dirent* e = readdir(d)) {
@@ -76,11 +77,11 @@ inline void Scan(const std::string& dir, std::vector<Skin>& out, int depth = 0, 
         if (S_ISDIR(st.st_mode)) {
             if (ln == "cleo" || ln == "player.img") continue;   // scripts y ropa de CJ: no son skins
             if (depth == 0 && ln == "menu") continue;           // temas del menu de ZyZ
-            Scan(full, out, depth + 1, forced || ln == "skins");
+            Scan(full, out, rejected, depth + 1, forced || ln == "skins");
         } else if (EndsWith(n, ".dff")) {
             std::string base = n.substr(0, n.size() - 4);
             if (base.empty() || base.size() > 23) continue;     // limite del nombre de modelo del juego
-            if (!forced && !IsPedDff(full)) continue;
+            if (!forced && !IsPedDff(full)) { if (rejected) rejected->push_back(full); continue; }
             bool dup = false;
             for (auto& s : out) if (Lower(s.name) == Lower(base)) { dup = true; break; }
             if (!dup) out.push_back({base, full});

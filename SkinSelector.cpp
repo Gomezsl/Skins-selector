@@ -4,6 +4,7 @@
 #include <mod/amlmod.h>
 #include <android/log.h>
 #include <atomic>
+#include <cstdarg>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -19,16 +20,31 @@ MYMODCFG(net.local.skinselector, Skin Selector, 1.0.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "SkinSelector"
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
 
 // ---- rutas -------------------------------------------------------------------------------------
-static const char* kRoots[] = {
-    "/storage/emulated/0/Android/data/com.rockstargames.gtasa/files/modloader",
-    "/sdcard/Android/data/com.rockstargames.gtasa/files/modloader",
-    "/storage/self/primary/Android/data/com.rockstargames.gtasa/files/modloader",
+// Carpeta "files" del juego. En algunos telefonos es Android_unprotected (asi lo muestra el log de ZyZ).
+static const char* kFilesDirs[] = {
+    "/storage/emulated/0/Android_unprotected/data/com.rockstargames.gtasa/files",
+    "/storage/emulated/0/Android/data/com.rockstargames.gtasa/files",
+    "/sdcard/Android/data/com.rockstargames.gtasa/files",
+    "/storage/self/primary/Android/data/com.rockstargames.gtasa/files",
 };
 static std::string g_root;       // .../files/modloader
-static std::string g_plugDir;    // .../files/SkinSelector  (aqui van skins_list.txt y request.txt)
+static std::string g_plugDir;    // .../files/SkinSelector  (skins_list.txt, request.txt, log.txt)
+
+static void Log(const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    __android_log_print(ANDROID_LOG_INFO, TAG, "%s", buf);
+    if (!g_plugDir.empty()) {
+        FILE* f = fopen((g_plugDir + "/log.txt").c_str(), "a");
+        if (f) { fputs(buf, f); fputc('\n', f); fclose(f); }
+    }
+}
+#define LOGI(...) Log(__VA_ARGS__)
 
 // ---- funciones del juego (libGTASA.so 2.10 arm64) -----------------------------------------------
 static void  (*RequestSpecialChar)(int, const char*, int);
@@ -59,9 +75,11 @@ static void WriteList() {
 }
 static void Rescan() {
     g_skins.clear();
-    skinscan::Scan(g_root, g_skins);
+    std::vector<std::string> rejected;
+    skinscan::Scan(g_root, g_skins, &rejected);
     LOGI("%zu skin(s) en %s", g_skins.size(), g_root.c_str());
-    for (auto& s : g_skins) LOGI("  - %s", s.name.c_str());
+    for (auto& k : g_skins) LOGI("  + skin: %s", k.name.c_str());
+    for (auto& r : rejected) LOGI("  - .dff sin chunk de skin (no es ped, se ignora): %s", r.c_str());
     WriteList();
 }
 
@@ -114,6 +132,7 @@ static void PollRequestFile() {
 
 static void CGame_Process_hook() {
     CGame_Process_orig();
+    if (g_frame == 0) LOGI("hook de CGame::Process activo");
     if (++g_frame % 45 == 0) PollRequestFile();
     int p = g_pending.load();
     if (p != -2 && ApplySkin(p)) g_pending = -2;
@@ -128,31 +147,44 @@ static void OnPick(int oldVal, int newVal, void*) { g_pending = newVal - 1; }  /
 #endif
 
 extern "C" void OnModLoad() {
-    for (auto r : kRoots) { struct stat st; if (stat(r, &st) == 0) { g_root = r; break; } }
-    if (g_root.empty()) g_root = kRoots[0];
-    g_plugDir = g_root.substr(0, g_root.rfind("/modloader")) + "/SkinSelector";
+    std::string files;
+    for (auto d : kFilesDirs) {          // la que tenga modloader/ es la buena
+        struct stat st;
+        if (stat((std::string(d) + "/modloader").c_str(), &st) == 0) { files = d; break; }
+    }
+    if (files.empty()) {                 // ninguna tiene modloader: usa la primera "files" que exista
+        for (auto d : kFilesDirs) { struct stat st; if (stat(d, &st) == 0) { files = d; break; } }
+    }
+    if (files.empty()) files = kFilesDirs[0];
+    g_root = files + "/modloader";
+    g_plugDir = files + "/SkinSelector";
     mkdir(g_plugDir.c_str(), 0777);
+    LOGI("== SkinSelector 1.0.1 cargado (OnModLoad) ==");
+    LOGI("files: %s", files.c_str());
 
     void* h = aml->GetLibHandle("libGTASA.so");
-    #define SYM(var, name) *(void**)&var = (void*)aml->GetSym(h, name)
+    #define SYM(var, name) do { *(void**)&var = (void*)aml->GetSym(h, name); LOGI("  %s %s", var ? "ok     " : "FALTA  ", name); } while (0)
     SYM(RequestSpecialChar,             "_ZN10CStreaming18RequestSpecialCharEiPKci");
     SYM(LoadAllRequestedModels,         "_ZN10CStreaming22LoadAllRequestedModelsEb");
     SYM(HasSpecialCharLoaded,           "_ZN10CStreaming20HasSpecialCharLoadedEi");
     SYM(SetMissionDoesntRequireSpecialChar, "_ZN10CStreaming34SetMissionDoesntRequireSpecialCharEi");
     SYM(FindPlayerPed,                  "_Z13FindPlayerPedi");
     SYM(SetModelIndex,                  "_ZN4CPed13SetModelIndexEj");
-    SYM(DeleteRwObject,                 "_ZN7CEntity14DeleteRwObjectEv");   // si no existe queda en NULL
-    SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");
+    SYM(DeleteRwObject,                 "_ZN7CEntity14DeleteRwObjectEv");   // opcional
+    SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");  // opcional
     void* process = (void*)aml->GetSym(h, "_ZN5CGame7ProcessEv");
+    LOGI("  %s _ZN5CGame7ProcessEv", process ? "ok     " : "FALTA  ");
     #undef SYM
+
+    Rescan();   // lista las skins aunque falte algun simbolo
 
     if (!RequestSpecialChar || !LoadAllRequestedModels || !HasSpecialCharLoaded ||
         !SetMissionDoesntRequireSpecialChar || !FindPlayerPed || !SetModelIndex || !process) {
-        LOGI("faltan simbolos de libGTASA.so: el plugin no se activa");
+        LOGI("faltan simbolos de libGTASA.so: no se puede cambiar la skin");
         return;
     }
     aml->Hook(process, (void*)CGame_Process_hook, (void**)&CGame_Process_orig);
-    Rescan();
+    LOGI("hook puesto en CGame::Process");
 }
 
 extern "C" void OnAllModsLoaded() {
