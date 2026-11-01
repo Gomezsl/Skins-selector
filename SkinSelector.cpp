@@ -18,10 +18,10 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.local.skinselector, Skin Selector, 1.0.0, Tu nombre)
+MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.5.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
-#define TAG "SkinSelector"
+#define TAG "VestidorSA"
 
 // ---- rutas -------------------------------------------------------------------------------------
 // Carpeta "files" del juego. En algunos telefonos es Android_unprotected (asi lo muestra el log de ZyZ).
@@ -32,7 +32,7 @@ static const char* kFilesDirs[] = {
     "/storage/self/primary/Android/data/com.rockstargames.gtasa/files",
 };
 static std::string g_root;       // .../files/modloader
-static std::string g_plugDir;    // .../files/SkinSelector  (skins_list.txt, request.txt, log.txt)
+static std::string g_plugDir;    // .../files/VestidorSA  (skins_list.txt, request.txt, log.txt)
 
 static void Log(const char* fmt, ...) {
     char buf[512];
@@ -60,8 +60,9 @@ static void  (*RebuildPlayer)(void*, bool);           // CClothes::RebuildPlayer
 static void* (*GetModelInfoByName)(const char*, int*);   // CModelInfo::GetModelInfo(name, &index)
 static void  (*CGame_Process_orig)();
 
-static int g_slot = 1;          // slot de personaje especial (1 normal; 9 con "skin en misiones" para no chocar con los de las misiones)
-static bool g_missions = false; // opcion: mantener la skin tambien durante las misiones
+static int g_slot = 9;          // slot de personaje especial (1 normal; 9 con "skin en misiones" para no chocar con los de las misiones)
+static bool g_missions = true;  // siempre activa por defecto: la skin se mantiene en misiones y solo se quita en cinematicas
+static std::string g_title = "VESTIDOR SA";   // nombre del menu (editable en settings.txt: title=...) // opcion: mantener la skin tambien durante las misiones
 
 // ---- estado --------------------------------------------------------------------------------------
 static std::vector<skinscan::Skin> g_skins;
@@ -96,7 +97,7 @@ static void WriteCurrent(const char* name) {   // el menu lee esto para marcar l
 static void SaveSettings() {
     FILE* f = fopen((g_plugDir + "/settings.txt").c_str(), "w");
     if (!f) return;
-    fprintf(f, "remember=%d\nmissions=%d\nlast=%s\n", g_remember ? 1 : 0, g_missions ? 1 : 0, g_lastName.c_str());
+    fprintf(f, "remember=%d\nmissions=%d\ntitle=%s\nlast=%s\n", g_remember ? 1 : 0, g_missions ? 1 : 0, g_title.c_str(), g_lastName.c_str());
     fclose(f);
 }
 static void LoadSettings() {
@@ -107,7 +108,8 @@ static void LoadSettings() {
         std::string l = line;
         while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ')) l.pop_back();
         if (l.rfind("remember=", 0) == 0) g_remember = (l.substr(9) == "1");
-        else if (l.rfind("missions=", 0) == 0) { g_missions = (l.substr(9) == "1"); g_slot = g_missions ? 9 : 1; }
+        // "missions=" se ignora: la skin en misiones esta siempre activa (MISSIONS_OFF en request.txt solo vale hasta cerrar el juego)
+        else if (l.rfind("title=", 0) == 0 && l.size() > 6) g_title = l.substr(6);
         else if (l.rfind("last=", 0) == 0) g_lastName = l.substr(5);
     }
     fclose(f);
@@ -420,7 +422,7 @@ extern "C" void OnModLoad() {
     }
     if (files.empty()) files = kFilesDirs[0];
     g_root = files + "/modloader";
-    g_plugDir = files + "/SkinSelector";
+    g_plugDir = files + "/VestidorSA";
     mkdir(g_plugDir.c_str(), 0777);
     {   // log nuevo en cada inicio; si quedo un request.working, esa skin crasheo el juego
         std::string w = g_plugDir + "/request.working", c = g_plugDir + "/crashed_request.txt";
@@ -431,7 +433,7 @@ extern "C" void OnModLoad() {
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
     LoadSettings();
-    LOGI("== SkinSelector 1.3.1 cargado (OnModLoad) ==");
+    LOGI("== Vestidor SA 1.5.0 cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 

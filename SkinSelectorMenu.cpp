@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <algorithm>
 #include <atomic>
 #include <cfloat>
 #include <chrono>
@@ -23,10 +24,10 @@
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 
-MYMODCFG(net.local.skinselectormenu, Skin Selector Menu, 1.0.0, Tu nombre)
+MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 1.4.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
-#define TAG "SkinSelectorMenu"
+#define TAG "VestidorSAMenu"
 
 // ---- rutas y log ---------------------------------------------------------------------------------
 static const char* kFilesDirs[] = {
@@ -35,7 +36,7 @@ static const char* kFilesDirs[] = {
     "/sdcard/Android/data/com.rockstargames.gtasa/files",
     "/storage/self/primary/Android/data/com.rockstargames.gtasa/files",
 };
-static std::string g_plugDir;   // .../files/SkinSelector
+static std::string g_plugDir;   // .../files/VestidorSA
 
 static void Log(const char* fmt, ...) {
     char buf[400];
@@ -107,10 +108,10 @@ static bool PatchGot(const char* libName, const char* sym, void* repl, void** or
 }
 
 // ---- lista de skins (la escribe SkinSelector en skins_list.txt) -----------------------------------
-static std::vector<std::string> g_names;
+static std::vector<std::string> g_skinsM;
 static std::string g_current = "CJ";
+static std::string g_title = "VESTIDOR SA";
 static bool g_remember = false;
-static bool g_missions = false;
 static time_t g_lastRead = 0;
 static std::mutex g_listMtx;
 
@@ -129,7 +130,7 @@ static void RefreshList() {
     time_t now = time(nullptr);
     if (now - g_lastRead < 2) return;
     g_lastRead = now;
-    std::vector<std::string> names;
+    std::vector<std::string> skins;
     FILE* f = fopen((g_plugDir + "/skins_list.txt").c_str(), "r");
     if (f) {
         char line[1024];
@@ -139,25 +140,29 @@ static void RefreshList() {
             size_t eq = l.find(" = ");
             size_t pa = l.find("   (/");
             if (eq == std::string::npos || pa == std::string::npos || pa < eq + 3) continue;
-            names.push_back(l.substr(eq + 3, pa - eq - 3));
+            skins.push_back(l.substr(eq + 3, pa - eq - 3));
         }
         fclose(f);
     }
     std::string cur = ReadFirstLine(g_plugDir + "/current.txt");
-    bool rem = false, mis = false;
+    bool rem = false;
+    std::string title;
     FILE* sf = fopen((g_plugDir + "/settings.txt").c_str(), "r");
     if (sf) {
         char sl[200];
         while (fgets(sl, sizeof sl, sf)) {
             if (strncmp(sl, "remember=", 9) == 0) rem = (sl[9] == '1');
-            else if (strncmp(sl, "missions=", 9) == 0) mis = (sl[9] == '1');
+            else if (strncmp(sl, "title=", 6) == 0) {
+                title = sl + 6;
+                while (!title.empty() && (title.back() == '\n' || title.back() == '\r')) title.pop_back();
+            }
         }
         fclose(sf);
     }
     std::lock_guard<std::mutex> lk(g_listMtx);
+    g_skinsM = skins;
     g_remember = rem;
-    g_missions = mis;
-    g_names = names;
+    if (!title.empty()) g_title = title;
     if (!cur.empty()) g_current = cur;
 }
 
@@ -213,96 +218,163 @@ static int g_page = 0;
 static void* (*FindPlayerPed)(int);
 static std::vector<Rect> g_frameRects;
 
+struct Item { std::string label, right; ImVec4 col; int action; std::string arg; };
+static const ImVec4 kWhite(1.0f, 1.0f, 1.0f, 1.0f);
+static const ImVec4 kGreen(0.45f, 0.95f, 0.50f, 1.0f);
+static const ImVec4 kRed(0.97f, 0.42f, 0.38f, 1.0f);
+static const ImVec4 kGold(0.96f, 0.74f, 0.18f, 1.0f);
+static const ImVec4 kGrey(0.78f, 0.78f, 0.80f, 1.0f);
+
 static void AddRect() {
     ImVec2 p = ImGui::GetWindowPos(), s = ImGui::GetWindowSize();
     float m = 12.0f;
     g_frameRects.push_back({p.x - m, p.y - m, p.x + s.x + m, p.y + s.y + m});
 }
 
+// fila tipo lista: texto a la izquierda y, si hay, un texto a la derecha (">" o "PUESTA")
+static bool Row(const Item& it, float rh, float k) {
+    ImGui::PushStyleColor(ImGuiCol_Text, it.col);
+    bool clicked = ImGui::Button(it.label.c_str(), ImVec2(-1, rh));
+    ImGui::PopStyleColor();
+    if (!it.right.empty()) {
+        ImVec2 mn = ImGui::GetItemRectMin(), mx = ImGui::GetItemRectMax();
+        ImVec2 ts = ImGui::CalcTextSize(it.right.c_str());
+        ImGui::GetWindowDrawList()->AddText(ImVec2(mx.x - ts.x - 16.0f * k, mn.y + (mx.y - mn.y - ts.y) * 0.5f),
+                                            ImGui::GetColorU32(it.col), it.right.c_str());
+    }
+    return clicked;
+}
+
 static void BuildUI(float W, float H, float k) {
     g_frameRects.clear();
+    std::vector<std::string> skins;
+    std::string cur, title;
+    bool rem;
+    { std::lock_guard<std::mutex> lk(g_listMtx); skins = g_skinsM; cur = g_current; title = g_title; rem = g_remember; }
+
     const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
-                                   ImGuiWindowFlags_NoFocusOnAppearing;
+                                   ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoTitleBar |
+                                   ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
 
-    ImGui::SetNextWindowPos(ImVec2(10.0f * k, H * 0.30f));
-    ImGui::SetNextWindowBgAlpha(0.55f);
-    ImGui::Begin("##skbtn", nullptr, fixed | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize |
-                                     ImGuiWindowFlags_NoScrollbar);
-    if (ImGui::Button(g_open ? " X " : "SKINS", ImVec2(0, 0))) g_open = !g_open;
-    AddRect();
-    ImGui::End();
+    // ---- boton cerrado: solo el nombre del menu en el borde izquierdo ----
+    if (!g_open) {
+        ImGui::SetNextWindowPos(ImVec2(10.0f * k, H * 0.30f));
+        ImGui::SetNextWindowBgAlpha(0.55f);
+        ImGui::Begin("##vbtn", nullptr, fixed | ImGuiWindowFlags_AlwaysAutoResize);
+        if (ImGui::Button(title.c_str())) { g_open = true; g_page = 0; }
+        AddRect();
+        ImGui::End();
+        return;
+    }
 
-    if (!g_open) return;
-
-    std::vector<std::string> names;
-    std::string cur;
-    { std::lock_guard<std::mutex> lk(g_listMtx); names = g_names; cur = g_current; }
-
-    const int perPage = 4;
-    int pages = (int)((names.size() + perPage - 1) / perPage);
+    // ---- elementos de la lista: CJ, skins y la opcion de recordar ----
+    std::vector<Item> items;
+    items.push_back({"Volver a ser CJ", "", kRed, 2, ""});
+    for (auto& s : skins) {
+        bool on = (s == cur);
+        items.push_back({s, on ? "PUESTA" : "", on ? kGreen : kWhite, 1, s});
+    }
+    items.push_back({std::string("Recordar ultima skin: ") + (rem ? "SI" : "NO"), "", kGrey, 3, ""});
+    const int perPage = 6;
+    int pages = ((int)items.size() + perPage - 1) / perPage;
     if (pages < 1) pages = 1;
     if (g_page >= pages) g_page = pages - 1;
     if (g_page < 0) g_page = 0;
 
-    ImGui::SetNextWindowPos(ImVec2(W * 0.5f, H * 0.5f), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(W * 0.46f, H * 0.86f));
-    ImGui::SetNextWindowBgAlpha(0.85f);
-    ImGui::Begin("Skins", nullptr, fixed | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
-    const float bh = 70.0f * k;
-    const ImVec4 on(0.16f, 0.55f, 0.20f, 1.0f);
+    // ---- panel principal (izquierda) ----
+    const float pw = W * 0.43f, ph = H * 0.69f;
+    ImGui::SetNextWindowPos(ImVec2(W * 0.02f, H * 0.085f));
+    ImGui::SetNextWindowSize(ImVec2(pw, ph));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.04f, 0.05f, 0.86f));
+    ImGui::Begin("##vpanel", nullptr, fixed);
+    const float pad = ImGui::GetStyle().WindowPadding.x;
 
-    bool isCJ = (cur == "CJ");
-    if (isCJ) ImGui::PushStyleColor(ImGuiCol_Button, on);
-    if (ImGui::Button("CJ (original)", ImVec2(-1, bh))) Request("CJ");
-    if (isCJ) ImGui::PopStyleColor();
+    ImGui::TextColored(kGold, "%s", title.c_str());
+    {
+        float xw = 54.0f * k;
+        ImGui::SameLine(pw - xw - pad);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.42f, 0.09f, 0.09f, 1.0f));
+        if (ImGui::Button("X", ImVec2(xw, 0))) g_open = false;
+        ImGui::PopStyleColor();
+    }
+    ImGui::Spacing();
 
-    for (int i = g_page * perPage; i < (int)names.size() && i < (g_page + 1) * perPage; i++) {
-        bool sel = (names[i] == cur);
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.11f, 0.12f, 0.92f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.20f, 0.22f, 0.95f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.30f, 0.30f, 0.33f, 1.0f));
+    const float rh = 56.0f * k;
+    for (int i = g_page * perPage; i < (int)items.size() && i < (g_page + 1) * perPage; i++) {
         ImGui::PushID(i);
-        if (sel) ImGui::PushStyleColor(ImGuiCol_Button, on);
-        if (ImGui::Button(names[i].c_str(), ImVec2(-1, bh))) Request(names[i]);
-        if (sel) ImGui::PopStyleColor();
+        if (Row(items[i], rh, k)) {
+            const Item& it = items[i];
+            if (it.action == 1) Request(it.arg);
+            else if (it.action == 2) Request("CJ");
+            else if (it.action == 3) {
+                { std::lock_guard<std::mutex> lk(g_listMtx); g_remember = !rem; g_lastRead = time(nullptr); }
+                Request(rem ? "REMEMBER_OFF" : "REMEMBER_ON");
+            }
+        }
         ImGui::PopID();
     }
-    if (names.empty()) ImGui::Text("Sin skins (revisa skins_list.txt)");
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
 
-    ImGui::Separator();
-    float half = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x * 2.0f) / 3.0f;
-    if (ImGui::Button("<", ImVec2(half, bh * 0.8f))) g_page = (g_page + pages - 1) % pages;
-    ImGui::SameLine();
-    char pg[32];
-    snprintf(pg, sizeof pg, "%d / %d", g_page + 1, pages);
-    ImGui::Button(pg, ImVec2(half, bh * 0.8f));
-    ImGui::SameLine();
-    if (ImGui::Button(">", ImVec2(half, bh * 0.8f))) g_page = (g_page + 1) % pages;
-    {
-        bool rem;
-        { std::lock_guard<std::mutex> lk(g_listMtx); rem = g_remember; }
-        char rb[48];
-        snprintf(rb, sizeof rb, "Recordar ultima skin: %s", rem ? "SI" : "NO");
-        if (rem) ImGui::PushStyleColor(ImGuiCol_Button, on);
-        if (ImGui::Button(rb, ImVec2(-1, bh * 0.8f))) {
-            { std::lock_guard<std::mutex> lk(g_listMtx); g_remember = !rem; g_lastRead = time(nullptr); }
-            Request(rem ? "REMEMBER_OFF" : "REMEMBER_ON");
-        }
-        if (rem) ImGui::PopStyleColor();
-    }
-    {
-        bool mis;
-        { std::lock_guard<std::mutex> lk(g_listMtx); mis = g_missions; }
-        char mb[48];
-        snprintf(mb, sizeof mb, "Skin en misiones: %s", mis ? "SI" : "NO");
-        if (mis) ImGui::PushStyleColor(ImGuiCol_Button, on);
-        if (ImGui::Button(mb, ImVec2(-1, bh * 0.8f))) {
-            { std::lock_guard<std::mutex> lk(g_listMtx); g_missions = !mis; g_lastRead = time(nullptr); }
-            Request(mis ? "MISSIONS_OFF" : "MISSIONS_ON");
-        }
-        if (mis) ImGui::PopStyleColor();
-    }
-    if (ImGui::Button("Cerrar", ImVec2(-1, bh * 0.8f))) g_open = false;
+    // ---- pie: pista y boton ATRAS ----
+    const float bh = 54.0f * k;
+    char hint[64];
+    if (pages > 1) snprintf(hint, sizeof hint, "Toca una opcion   (%d/%d)", g_page + 1, pages);
+    else snprintf(hint, sizeof hint, "Toca una opcion");
+    ImGui::SetCursorPos(ImVec2(pad, ImGui::GetWindowHeight() - bh - pad - 30.0f * k));
+    ImGui::SetWindowFontScale(0.7f);
+    ImGui::TextColored(kGrey, "%s", hint);
+    ImGui::SetWindowFontScale(1.0f);
+    ImGui::SetCursorPos(ImVec2(pad, ImGui::GetWindowHeight() - bh - pad));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.22f, 0.24f, 1.0f));
+    if (ImGui::Button("< ATRAS", ImVec2(pw * 0.34f, bh))) g_open = false;
+    ImGui::PopStyleColor();
     AddRect();
     ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
+
+    // ---- botones de pagina "<" ">" (abajo a la izquierda, fuera del panel) ----
+    if (pages > 1) {
+        ImGui::SetNextWindowPos(ImVec2(W * 0.02f, H * 0.80f));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+        ImGui::Begin("##vnav", nullptr, fixed | ImGuiWindowFlags_AlwaysAutoResize);
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f * k);
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.88f));
+        if (ImGui::Button("<", ImVec2(W * 0.095f, H * 0.13f))) g_page = (g_page + pages - 1) % pages;
+        ImGui::SameLine();
+        if (ImGui::Button(">", ImVec2(W * 0.095f, H * 0.13f))) g_page = (g_page + 1) % pages;
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar();
+        AddRect();
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+    }
+
+    // ---- SALIR (arriba a la derecha) ----
+    ImGui::SetNextWindowPos(ImVec2(W * 0.985f, H * 0.03f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::Begin("##vexit", nullptr, fixed | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f * k);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.80f, 0.22f, 0.20f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.40f, 0.07f, 0.07f, 0.95f));
+    if (ImGui::Button("SALIR", ImVec2(W * 0.13f, H * 0.085f))) g_open = false;
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar();
+    AddRect();
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
 }
 
 // ---- dibujo (hilo de render, justo antes de eglSwapBuffers) --------------------------------------
@@ -395,10 +467,10 @@ extern "C" void OnModLoad() {
         if (stat((std::string(d) + "/modloader").c_str(), &st) == 0) { files = d; break; }
     }
     if (files.empty()) files = kFilesDirs[0];
-    g_plugDir = files + "/SkinSelector";
+    g_plugDir = files + "/VestidorSA";
     mkdir(g_plugDir.c_str(), 0777);
     FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
-    Log("== SkinSelectorMenu 1.2.0 cargado ==");
+    Log("== Vestidor SA Menu 1.4.0 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
