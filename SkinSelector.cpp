@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include <unistd.h>
+#include <sys/mman.h>
 #include "skinscan.h"
 
 #if __has_include("isautils.h")
@@ -18,7 +19,7 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.6.0, Tu nombre)
+MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.7.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSA"
@@ -59,6 +60,8 @@ static void  (*DeleteRwObject)(void*);                // CEntity::DeleteRwObject
 static void  (*RebuildPlayer)(void*, bool);           // CClothes::RebuildPlayer (opcional, para volver a CJ)
 static void* (*GetModelInfoByName)(const char*, int*);   // CModelInfo::GetModelInfo(name, &index)
 static void  (*CGame_Process_orig)();
+static void  (*CGame_InitRestart_orig)();
+static void  (*CGame_ShutRestart_orig)();
 
 static int g_slot = 9;          // slot de personaje especial (1 normal; 9 con "skin en misiones" para no chocar con los de las misiones)
 static bool g_missions = true;  // siempre activa por defecto: la skin se mantiene en misiones y solo se quita en cinematicas
@@ -151,6 +154,53 @@ static void Rescan() {
 static std::atomic<bool> g_noDelete{false};
 static void* g_pedVtbl = nullptr;   // vtable de CPedModelInfo (se toma de "male01")
 
+static void (*ClearTaskDuckSecondary)(void*);   // CPedIntelligence::ClearTaskDuckSecondary
+static int g_intelOff = -1;
+static bool g_intelTried = false;
+static const uintptr_t kPtrMask = 0x00FFFFFFFFFFFFFFull;
+
+static bool Readable(const void* p, size_t n) {
+    uintptr_t a = (uintptr_t)p & kPtrMask;
+    if (a < 0x10000) return false;
+    long pg = sysconf(_SC_PAGESIZE);
+    uintptr_t st = a & ~((uintptr_t)pg - 1), en = (a + n - 1) & ~((uintptr_t)pg - 1);
+    size_t pages = (size_t)((en - st) / (uintptr_t)pg) + 1;
+    if (pages > 2) return false;
+    unsigned char vec[2];
+    return mincore((void*)st, pages * (size_t)pg, vec) == 0;
+}
+
+// CPedIntelligence empieza con m_pPed (puntero al ped): asi se localiza ped->m_pIntelligence sin conocer el offset
+static void* FindIntelligence(void* ped) {
+    if (g_intelOff < 0 && !g_intelTried) {
+        g_intelTried = true;
+        int found[4], n = 0;
+        for (int o = 0x200; o < 0x700 && n < 4; o += 8) {
+            void* p;
+            memcpy(&p, (const char*)ped + o, sizeof p);
+            if (((uintptr_t)p & 7) || !Readable(p, 8)) continue;
+            uintptr_t first;
+            memcpy(&first, p, sizeof first);
+            if ((first & kPtrMask) == ((uintptr_t)ped & kPtrMask)) found[n++] = o;
+        }
+        LOGI("  calibracion CPedIntelligence: %d candidato(s)", n);
+        for (int i = 0; i < n; i++) LOGI("    +0x%03x", found[i]);
+        if (n == 1) { g_intelOff = found[0]; LOGI("  m_pIntelligence calibrado en ped+0x%03x", g_intelOff); }
+        else LOGI("  m_pIntelligence SIN calibrar: no se limpia la tarea de agacharse");
+    }
+    if (g_intelOff < 0) return nullptr;
+    void* p;
+    memcpy(&p, (const char*)ped + g_intelOff, sizeof p);
+    return p;
+}
+
+// agachado, el cambio de modelo dejaba la tarea de agacharse apuntando a animaciones destruidas (el jugador no podia caminar)
+static void ClearDuck(void* ped) {
+    if (!ClearTaskDuckSecondary) return;
+    void* in = FindIntelligence(ped);
+    if (in) ClearTaskDuckSecondary(in);
+}
+
 static int ReadPedModel(void* ped) {
     if (g_miOff < 0 || !ped) return -1;
     uint16_t v;
@@ -163,6 +213,7 @@ static bool ApplySkin(int idx, bool force = false) {
     void* ped = FindPlayerPed(-1);
     if (!ped) return false;                       // aun no hay jugador (menu / carga): se reintenta
     if (idx < 0) {                                // volver a CJ
+        ClearDuck(ped);
         if (DeleteRwObject) DeleteRwObject(ped);
         SetModelIndex(ped, 0);
         if (RebuildPlayer) RebuildPlayer(ped, false);
@@ -228,6 +279,7 @@ static bool ApplySkin(int idx, bool force = false) {
             }
         }
     }
+    ClearDuck(ped);
     if (DeleteRwObject && !g_noDelete.load()) { LOGI("  DeleteRwObject(ped=%p)", ped); DeleteRwObject(ped); }
     LOGI("  SetModelIndex(ped=%p, modelo=%u)", ped, modelId);
     SetModelIndex(ped, modelId);
@@ -406,6 +458,17 @@ static void Watchdog() {
     }
 }
 
+static void CGame_InitRestart_hook() {
+    g_sessionPending = true;
+    LOGI("CGame::InitialiseWhenRestarting (partida nueva o cargada)");
+    CGame_InitRestart_orig();
+}
+static void CGame_ShutRestart_hook() {
+    g_sessionPending = true;
+    LOGI("CGame::ShutDownForRestart (partida nueva o cargada)");
+    CGame_ShutRestart_orig();
+}
+
 static void CGame_Process_hook() {
     CGame_Process_orig();
     if (g_frame == 0) LOGI("hook de CGame::Process activo");
@@ -444,7 +507,8 @@ extern "C" void OnModLoad() {
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
     LoadSettings();
-    LOGI("== Vestidor SA 1.6.0 cargado (OnModLoad) ==");
+    WriteCurrent("CJ");   // proceso nuevo = CJ; si "recordar" esta activo, current.txt se actualiza al reaplicar
+    LOGI("== Vestidor SA 1.7.0 cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
@@ -459,6 +523,8 @@ extern "C" void OnModLoad() {
     SYM(DeleteRwObject,                 "_ZN7CEntity14DeleteRwObjectEv");   // opcional
     SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");  // opcional
     SYM(GetModelInfoByName,             "_ZN10CModelInfo12GetModelInfoEPKcPi");
+    *(void**)&ClearTaskDuckSecondary = (void*)aml->GetSym(h, "_ZN16CPedIntelligence22ClearTaskDuckSecondaryEv");
+    LOGI("  %s CPedIntelligence::ClearTaskDuckSecondary", ClearTaskDuckSecondary ? "ok" : "FALTA");
     g_scriptSpace = (uint8_t*)aml->GetSym(h, "_ZN11CTheScripts11ScriptSpaceE");
     LOGI("  %s _ZN11CTheScripts11ScriptSpaceE", g_scriptSpace ? "ok     " : "FALTA  ");
     g_cutPtr = (const volatile uint8_t*)aml->GetSym(h, "_ZN12CCutsceneMgr10ms_runningE");
@@ -485,6 +551,11 @@ extern "C" void OnModLoad() {
     }
     aml->Hook(process, (void*)CGame_Process_hook, (void**)&CGame_Process_orig);
     LOGI("hook puesto en CGame::Process");
+    void* initRestart = (void*)aml->GetSym(h, "_ZN5CGame24InitialiseWhenRestartingEv");
+    void* shutRestart = (void*)aml->GetSym(h, "_ZN5CGame18ShutDownForRestartEv");
+    LOGI("  %s CGame::InitialiseWhenRestarting, %s CGame::ShutDownForRestart", initRestart ? "ok" : "FALTA", shutRestart ? "ok" : "FALTA");
+    if (initRestart) aml->Hook(initRestart, (void*)CGame_InitRestart_hook, (void**)&CGame_InitRestart_orig);
+    if (shutRestart) aml->Hook(shutRestart, (void*)CGame_ShutRestart_hook, (void**)&CGame_ShutRestart_orig);
 }
 
 extern "C" void OnAllModsLoaded() {

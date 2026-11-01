@@ -25,7 +25,7 @@
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 
-MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 1.5.0, Tu nombre)
+MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 1.6.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSAMenu"
@@ -487,7 +487,10 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
     }
 
     // ---- guardar el estado de GL del juego y dejarlo limpio para ImGui ----
-    GLint maxAttr = 8, lastElem = 0, lastVao = 0, lastFbo = 0, lastAttr[16] = {0};
+    struct AttribSt { GLint en, size, type, norm, stride, buf; void* ptr; };
+    AttribSt as[16];
+    GLint lastArrayBuf = 0;
+    GLint maxAttr = 8, lastElem = 0, lastVao = 0, lastFbo = 0;
     GLboolean cm[4] = {1, 1, 1, 1};
     // en gameplay el juego deja un FBO (fuera de pantalla) enlazado al presentar: ahi no se ve nada; se dibuja en el framebuffer 0
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &lastFbo);
@@ -499,7 +502,19 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
     glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &maxAttr);
     if (maxAttr > 16) maxAttr = 16;
     glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &lastElem);
-    for (int i = 0; i < maxAttr; i++) glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &lastAttr[i]);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &lastArrayBuf);
+    for (int i = 0; i < maxAttr; i++) {   // estado completo de cada atributo: ImGui pisa los punteros de los suyos
+        AttribSt& a = as[i];
+        a.en = a.size = a.type = a.norm = a.stride = a.buf = 0;
+        a.ptr = nullptr;
+        glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &a.en);
+        glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_SIZE, &a.size);
+        glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_TYPE, &a.type);
+        glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_NORMALIZED, &a.norm);
+        glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &a.stride);
+        glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &a.buf);
+        glGetVertexAttribPointerv(i, GL_VERTEX_ATTRIB_ARRAY_POINTER, &a.ptr);
+    }
     glGetBooleanv(GL_COLOR_WRITEMASK, cm);
     if (g_bindVao) { glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &lastVao); g_bindVao(0); }
     for (int i = 0; i < maxAttr; i++) glDisableVertexAttribArray(i);
@@ -527,10 +542,14 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
     // ---- devolver el estado al juego ----
     if (lastFbo != 0) glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)lastFbo);
     if (g_bindVao) g_bindVao((GLuint)lastVao);
-    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, (GLuint)lastElem);
     for (int i = 0; i < maxAttr; i++) {
-        if (lastAttr[i]) glEnableVertexAttribArray(i); else glDisableVertexAttribArray(i);
+        const AttribSt& a = as[i];
+        glBindBuffer(GL_ARRAY_BUFFER, (GLuint)a.buf);
+        glVertexAttribPointer(i, a.size > 0 ? a.size : 4, a.type ? (GLenum)a.type : GL_FLOAT, a.norm ? GL_TRUE : GL_FALSE, a.stride, a.ptr);
+        if (a.en) glEnableVertexAttribArray(i); else glDisableVertexAttribArray(i);
     }
+    glBindBuffer(GL_ARRAY_BUFFER, (GLuint)lastArrayBuf);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, (GLuint)lastElem);
     glColorMask(cm[0], cm[1], cm[2], cm[3]);
     { std::lock_guard<std::mutex> lk(g_inMtx); g_rects = g_frameRects; }
 }
@@ -553,7 +572,7 @@ extern "C" void OnModLoad() {
     g_plugDir = files + "/VestidorSA";
     mkdir(g_plugDir.c_str(), 0777);
     FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
-    Log("== Vestidor SA Menu 1.5.1 cargado ==");
+    Log("== Vestidor SA Menu 1.6.0 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
