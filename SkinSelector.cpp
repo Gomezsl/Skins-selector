@@ -60,7 +60,8 @@ static void  (*RebuildPlayer)(void*, bool);           // CClothes::RebuildPlayer
 static void* (*GetModelInfoByName)(const char*, int*);   // CModelInfo::GetModelInfo(name, &index)
 static void  (*CGame_Process_orig)();
 
-static const int kSlot = 1;  // slot de personaje especial 1 -> modelo 290
+static int g_slot = 1;          // slot de personaje especial (1 normal; 10 con "skin en misiones" para no chocar con los de las misiones)
+static bool g_missions = false; // opcion: mantener la skin tambien durante las misiones
 
 // ---- estado --------------------------------------------------------------------------------------
 static std::vector<skinscan::Skin> g_skins;
@@ -95,7 +96,7 @@ static void WriteCurrent(const char* name) {   // el menu lee esto para marcar l
 static void SaveSettings() {
     FILE* f = fopen((g_plugDir + "/settings.txt").c_str(), "w");
     if (!f) return;
-    fprintf(f, "remember=%d\nlast=%s\n", g_remember ? 1 : 0, g_lastName.c_str());
+    fprintf(f, "remember=%d\nmissions=%d\nlast=%s\n", g_remember ? 1 : 0, g_missions ? 1 : 0, g_lastName.c_str());
     fclose(f);
 }
 static void LoadSettings() {
@@ -106,6 +107,7 @@ static void LoadSettings() {
         std::string l = line;
         while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ')) l.pop_back();
         if (l.rfind("remember=", 0) == 0) g_remember = (l.substr(9) == "1");
+        else if (l.rfind("missions=", 0) == 0) { g_missions = (l.substr(9) == "1"); g_slot = g_missions ? 10 : 1; }
         else if (l.rfind("last=", 0) == 0) g_lastName = l.substr(5);
     }
     fclose(f);
@@ -162,22 +164,22 @@ static bool ApplySkin(int idx, bool force = false) {
         return true;
     }
     LOGI("aplicando '%s'...", name.c_str());
-    RequestSpecialChar(kSlot, name.c_str(), 0);
+    RequestSpecialChar(g_slot, name.c_str(), 0);
     LoadAllRequestedModels(false);
-    bool loaded = HasSpecialCharLoaded(kSlot);
+    bool loaded = HasSpecialCharLoaded(g_slot);
     LOGI("  HasSpecialCharLoaded = %d", (int)loaded);
     if (!loaded) {
         LOGI("skin '%s' no cargo (mira ZyZModLoader.log: nombre, .dff valido, textura)", name.c_str());
         return true;
     }
-    unsigned modelId = 289u + kSlot;   // valor por defecto; se corrige con el indice real que devuelve el juego
+    unsigned modelId = 290u + g_slot;   // valor por defecto; se corrige con el indice real que devuelve el juego
     {   // el juego dice en que id registro el modelo (RequestSpecialChar slot 1 -> id 291, no 290)
         int mIdx = -1;
         void* mi = GetModelInfoByName ? GetModelInfoByName(name.c_str(), &mIdx) : nullptr;
         if (mIdx >= 0) modelId = (unsigned)mIdx;
         LOGI("  GetModelInfo('%s') -> %p, id real del modelo = %d", name.c_str(), mi, mIdx);
-        if (mIdx >= 0 && (mIdx < 290 || mIdx > 299) && !force) {
-            LOGI("  id fuera del rango de personajes especiales (290-299): no se aplica");
+        if (mIdx >= 0 && (mIdx < 290 || mIdx > 310) && !force) {
+            LOGI("  id fuera del rango de personajes especiales (290-310): no se aplica");
             return true;
         }
         if (GetModelInfoByName && !mi && !force) {
@@ -221,7 +223,7 @@ static bool ApplySkin(int idx, bool force = false) {
         else LOGI("  m_nModelIndex SIN calibrar: no se detectan resets por modelo (solo por cinematica/mision/carga)");
     }
     g_wornModelId = modelId;
-    SetMissionDoesntRequireSpecialChar(kSlot);
+    SetMissionDoesntRequireSpecialChar(g_slot);
     g_curSkin = idx;
     WriteCurrent(name.c_str());
     LOGI("skin: %s", name.c_str());
@@ -264,6 +266,15 @@ static void PollRequestFile() {
         g_remember = (l == "remember_on");
         SaveSettings();
         LOGI("recordar ultima skin: %s", g_remember ? "SI" : "NO");
+        done();
+        return;
+    }
+    if (l == "missions_on" || l == "missions_off") {
+        g_missions = (l == "missions_on");
+        g_slot = g_missions ? 10 : 1;
+        SaveSettings();
+        LOGI("skin en misiones: %s (slot %d)", g_missions ? "SI" : "NO", g_slot);
+        if (g_desired >= 0) { g_needReapply = true; g_reapplyDelay = 10; g_giveUp = false; g_autoTries = 0; }
         done();
         return;
     }
@@ -321,11 +332,11 @@ static void Watchdog() {
     if (g_scriptSpace) memcpy(&om, g_scriptSpace + kOnMissionVar * 4, sizeof om);
     if (g_scriptSpace && om != g_prevMission) {
         if (g_missionLogs++ < 20) LOGI("ONMISSION %d -> %d", g_prevMission, om);
-        if (om != 0 && g_prevMission == 0 && g_curSkin >= 0 && g_pending.load() == -2) {
+        if (om != 0 && g_prevMission == 0 && !g_missions && g_curSkin >= 0 && g_pending.load() == -2) {
             LOGI("mision iniciada: se vuelve a CJ (la skin deseada se conserva)");
             g_pending = -1;     // g_desired no cambia
         }
-        if (om == 0 && g_prevMission != 0 && g_desired >= 0) {
+        if (om == 0 && g_prevMission != 0 && g_desired >= 0 && g_curSkin != g_desired) {
             LOGI("mision terminada");
             g_needReapply = true; g_reapplyDelay = 60; g_giveUp = false; g_autoTries = 0;
         }
@@ -341,7 +352,7 @@ static void Watchdog() {
         }
     }
 
-    bool allowed = !cut && !loading && om == 0 && g_pending.load() == -2;
+    bool allowed = !cut && !loading && (om == 0 || g_missions) && g_pending.load() == -2;
     if (allowed && g_desired >= 0 && g_curSkin == g_desired && g_miOff >= 0) {
         int cur = ReadPedModel(ped);   // el guardado o la carga pudieron devolver al jugador a CJ
         if (cur != (int)g_wornModelId) {
@@ -405,8 +416,8 @@ extern "C" void OnModLoad() {
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
     LoadSettings();
-    LOGI("== SkinSelector 1.2.0 cargado (OnModLoad) ==");
-    LOGI("recordar ultima skin: %s, ultima: %s", g_remember ? "SI" : "NO", g_lastName.c_str());
+    LOGI("== SkinSelector 1.3.0 cargado (OnModLoad) ==");
+    LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
     void* h = aml->GetLibHandle("libGTASA.so");

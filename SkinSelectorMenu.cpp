@@ -110,6 +110,7 @@ static bool PatchGot(const char* libName, const char* sym, void* repl, void** or
 static std::vector<std::string> g_names;
 static std::string g_current = "CJ";
 static bool g_remember = false;
+static bool g_missions = false;
 static time_t g_lastRead = 0;
 static std::mutex g_listMtx;
 
@@ -143,15 +144,19 @@ static void RefreshList() {
         fclose(f);
     }
     std::string cur = ReadFirstLine(g_plugDir + "/current.txt");
-    bool rem = false;
+    bool rem = false, mis = false;
     FILE* sf = fopen((g_plugDir + "/settings.txt").c_str(), "r");
     if (sf) {
         char sl[200];
-        while (fgets(sl, sizeof sl, sf)) if (strncmp(sl, "remember=", 9) == 0) rem = (sl[9] == '1');
+        while (fgets(sl, sizeof sl, sf)) {
+            if (strncmp(sl, "remember=", 9) == 0) rem = (sl[9] == '1');
+            else if (strncmp(sl, "missions=", 9) == 0) mis = (sl[9] == '1');
+        }
         fclose(sf);
     }
     std::lock_guard<std::mutex> lk(g_listMtx);
     g_remember = rem;
+    g_missions = mis;
     g_names = names;
     if (!cur.empty()) g_current = cur;
 }
@@ -244,7 +249,7 @@ static void BuildUI(float W, float H, float k) {
     ImGui::SetNextWindowSize(ImVec2(W * 0.46f, H * 0.86f));
     ImGui::SetNextWindowBgAlpha(0.85f);
     ImGui::Begin("Skins", nullptr, fixed | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoScrollbar);
-    const float bh = 78.0f * k;
+    const float bh = 70.0f * k;
     const ImVec4 on(0.16f, 0.55f, 0.20f, 1.0f);
 
     bool isCJ = (cur == "CJ");
@@ -282,6 +287,18 @@ static void BuildUI(float W, float H, float k) {
             Request(rem ? "REMEMBER_OFF" : "REMEMBER_ON");
         }
         if (rem) ImGui::PopStyleColor();
+    }
+    {
+        bool mis;
+        { std::lock_guard<std::mutex> lk(g_listMtx); mis = g_missions; }
+        char mb[48];
+        snprintf(mb, sizeof mb, "Skin en misiones: %s", mis ? "SI" : "NO");
+        if (mis) ImGui::PushStyleColor(ImGuiCol_Button, on);
+        if (ImGui::Button(mb, ImVec2(-1, bh * 0.8f))) {
+            { std::lock_guard<std::mutex> lk(g_listMtx); g_missions = !mis; g_lastRead = time(nullptr); }
+            Request(mis ? "MISSIONS_OFF" : "MISSIONS_ON");
+        }
+        if (mis) ImGui::PopStyleColor();
     }
     if (ImGui::Button("Cerrar", ImVec2(-1, bh * 0.8f))) g_open = false;
     AddRect();
@@ -381,7 +398,7 @@ extern "C" void OnModLoad() {
     g_plugDir = files + "/SkinSelector";
     mkdir(g_plugDir.c_str(), 0777);
     FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
-    Log("== SkinSelectorMenu 1.1.0 cargado ==");
+    Log("== SkinSelectorMenu 1.2.0 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
