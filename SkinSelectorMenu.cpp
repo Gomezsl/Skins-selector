@@ -487,8 +487,15 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
     }
 
     // ---- guardar el estado de GL del juego y dejarlo limpio para ImGui ----
-    GLint maxAttr = 8, lastElem = 0, lastVao = 0, lastAttr[16] = {0};
+    GLint maxAttr = 8, lastElem = 0, lastVao = 0, lastFbo = 0, lastAttr[16] = {0};
     GLboolean cm[4] = {1, 1, 1, 1};
+    // en gameplay el juego deja un FBO (fuera de pantalla) enlazado al presentar: ahi no se ve nada; se dibuja en el framebuffer 0
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &lastFbo);
+    if (lastFbo != 0) {
+        static int fboLogs = 0;
+        if (fboLogs++ < 5) Log("fbo %d enlazado al presentar: se dibuja en el framebuffer 0", lastFbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
     glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &maxAttr);
     if (maxAttr > 16) maxAttr = 16;
     glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &lastElem);
@@ -518,6 +525,7 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
     g_drawn++;
 
     // ---- devolver el estado al juego ----
+    if (lastFbo != 0) glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)lastFbo);
     if (g_bindVao) g_bindVao((GLuint)lastVao);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, (GLuint)lastElem);
     for (int i = 0; i < maxAttr; i++) {
@@ -545,7 +553,7 @@ extern "C" void OnModLoad() {
     g_plugDir = files + "/VestidorSA";
     mkdir(g_plugDir.c_str(), 0777);
     FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
-    Log("== Vestidor SA Menu 1.5.0 cargado ==");
+    Log("== Vestidor SA Menu 1.5.1 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
