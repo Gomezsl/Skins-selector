@@ -18,7 +18,7 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.5.0, Tu nombre)
+MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.6.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSA"
@@ -125,6 +125,9 @@ static void WriteList() {
     fclose(f);
 }
 static void Rescan() {
+    // los indices pueden cambiar al releer: se recuerdan por nombre
+    std::string desiredName = (g_desired >= 0 && g_desired < (int)g_skins.size()) ? g_skins[g_desired].name : "";
+    std::string wornName = (g_curSkin >= 0 && g_curSkin < (int)g_skins.size()) ? g_skins[g_curSkin].name : "";
     g_skins.clear();
     std::vector<std::string> rejected;
     skinscan::Scan(g_root, g_skins, &rejected);
@@ -133,6 +136,14 @@ static void Rescan() {
         LOGI("  + skin: %s  [chunk de skin/huesos: %s]%s", k.name.c_str(), k.ped ? "SI" : "NO",
              k.ped ? "" : "  <- NO es un ped valido: se bloquea (usa !nombre para forzar bajo tu riesgo)");
     LOGI("  (%zu .dff sin huesos ignorados: mapa, objetos, armas...)", rejected.size());
+    auto find = [&](const std::string& n) {
+        if (n.empty()) return -1;
+        for (size_t i = 0; i < g_skins.size(); i++)
+            if (skinscan::Lower(g_skins[i].name) == skinscan::Lower(n)) return (int)i;
+        return -1;
+    };
+    if (!desiredName.empty()) g_desired = find(desiredName);
+    if (!wornName.empty()) g_curSkin = find(wornName);
     WriteList();
 }
 
@@ -433,7 +444,7 @@ extern "C" void OnModLoad() {
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
     LoadSettings();
-    LOGI("== Vestidor SA 1.5.0 cargado (OnModLoad) ==");
+    LOGI("== Vestidor SA 1.6.0 cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 

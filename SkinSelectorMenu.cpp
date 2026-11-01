@@ -9,6 +9,7 @@
 #include <link.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
@@ -24,7 +25,7 @@
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 
-MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 1.4.0, Tu nombre)
+MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 1.5.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSAMenu"
@@ -245,6 +246,8 @@ static bool Row(const Item& it, float rh, float k) {
     return clicked;
 }
 
+static int g_screen = 0;          // 0 = skins, 1 = ajustes
+
 static void BuildUI(float W, float H, float k) {
     g_frameRects.clear();
     std::vector<std::string> skins;
@@ -257,25 +260,32 @@ static void BuildUI(float W, float H, float k) {
                                    ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoTitleBar |
                                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
 
-    // ---- boton cerrado: solo el nombre del menu en el borde izquierdo ----
+    // ---- menu cerrado: solo el boton con el nombre, en el borde izquierdo ----
     if (!g_open) {
         ImGui::SetNextWindowPos(ImVec2(10.0f * k, H * 0.30f));
         ImGui::SetNextWindowBgAlpha(0.55f);
         ImGui::Begin("##vbtn", nullptr, fixed | ImGuiWindowFlags_AlwaysAutoResize);
-        if (ImGui::Button(title.c_str())) { g_open = true; g_page = 0; }
+        if (ImGui::Button(title.c_str())) { g_open = true; g_screen = 0; g_page = 0; }
         AddRect();
         ImGui::End();
         return;
     }
 
-    // ---- elementos de la lista: CJ, skins y la opcion de recordar ----
+    const bool settings = (g_screen == 1);
+
+    // ---- elementos de la lista ----
     std::vector<Item> items;
-    items.push_back({"Volver a ser CJ", "", kRed, 2, ""});
-    for (auto& s : skins) {
-        bool on = (s == cur);
-        items.push_back({s, on ? "PUESTA" : "", on ? kGreen : kWhite, 1, s});
+    if (!settings) {
+        items.push_back({"Volver a ser CJ", "", kRed, 2, ""});
+        for (auto& s : skins) {
+            bool on = (s == cur);
+            items.push_back({s, on ? "PUESTA" : "", on ? kGreen : kWhite, 1, s});
+        }
+    } else {
+        items.push_back({std::string("Recordar ultima skin: ") + (rem ? "SI" : "NO"), "", kWhite, 3, ""});
+        items.push_back({"Releer carpeta de skins", "", kWhite, 4, ""});
+        items.push_back({"Skin en misiones: siempre activa", "", kGrey, 9, ""});
     }
-    items.push_back({std::string("Recordar ultima skin: ") + (rem ? "SI" : "NO"), "", kGrey, 3, ""});
     const int perPage = 6;
     int pages = ((int)items.size() + perPage - 1) / perPage;
     if (pages < 1) pages = 1;
@@ -291,7 +301,7 @@ static void BuildUI(float W, float H, float k) {
     ImGui::Begin("##vpanel", nullptr, fixed);
     const float pad = ImGui::GetStyle().WindowPadding.x;
 
-    ImGui::TextColored(kGold, "%s", title.c_str());
+    ImGui::TextColored(kGold, "%s", settings ? (title + "  -  AJUSTES").c_str() : title.c_str());
     {
         float xw = 54.0f * k;
         ImGui::SameLine(pw - xw - pad);
@@ -316,14 +326,15 @@ static void BuildUI(float W, float H, float k) {
                 { std::lock_guard<std::mutex> lk(g_listMtx); g_remember = !rem; g_lastRead = time(nullptr); }
                 Request(rem ? "REMEMBER_OFF" : "REMEMBER_ON");
             }
+            else if (it.action == 4) Request("RESCAN");
         }
         ImGui::PopID();
     }
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar();
 
-    // ---- pie: pista y boton ATRAS ----
-    const float bh = 54.0f * k;
+    // ---- pie: pista, ATRAS y AJUSTES ----
+    const float bh = 54.0f * k, bw = pw * 0.34f;
     char hint[64];
     if (pages > 1) snprintf(hint, sizeof hint, "Toca una opcion   (%d/%d)", g_page + 1, pages);
     else snprintf(hint, sizeof hint, "Toca una opcion");
@@ -333,32 +344,38 @@ static void BuildUI(float W, float H, float k) {
     ImGui::SetWindowFontScale(1.0f);
     ImGui::SetCursorPos(ImVec2(pad, ImGui::GetWindowHeight() - bh - pad));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.22f, 0.24f, 1.0f));
-    if (ImGui::Button("< ATRAS", ImVec2(pw * 0.34f, bh))) g_open = false;
+    if (ImGui::Button("< ATRAS", ImVec2(bw, bh))) {
+        if (settings) { g_screen = 0; g_page = 0; }      // de ajustes vuelve a las skins
+        else g_open = false;                             // de las skins cierra el menu
+    }
+    if (!settings) {
+        ImGui::SetCursorPos(ImVec2(pw - pad - bw, ImGui::GetWindowHeight() - bh - pad));
+        if (ImGui::Button("AJUSTES", ImVec2(bw, bh))) { g_screen = 1; g_page = 0; }
+    }
     ImGui::PopStyleColor();
     AddRect();
     ImGui::End();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
 
-    // ---- botones de pagina "<" ">" (abajo a la izquierda, fuera del panel) ----
-    if (pages > 1) {
-        ImGui::SetNextWindowPos(ImVec2(W * 0.02f, H * 0.80f));
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-        ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-        ImGui::Begin("##vnav", nullptr, fixed | ImGuiWindowFlags_AlwaysAutoResize);
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f * k);
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.88f));
-        if (ImGui::Button("<", ImVec2(W * 0.095f, H * 0.13f))) g_page = (g_page + pages - 1) % pages;
-        ImGui::SameLine();
-        if (ImGui::Button(">", ImVec2(W * 0.095f, H * 0.13f))) g_page = (g_page + 1) % pages;
-        ImGui::PopStyleColor(2);
-        ImGui::PopStyleVar();
-        AddRect();
-        ImGui::End();
-        ImGui::PopStyleColor();
-        ImGui::PopStyleVar();
-    }
+    // ---- botones de pagina "<" ">": ver mas skins (abajo a la izquierda, fuera del panel) ----
+    ImGui::SetNextWindowPos(ImVec2(W * 0.02f, H * 0.80f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::Begin("##vnav", nullptr, fixed | ImGuiWindowFlags_AlwaysAutoResize);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f * k);
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.88f));
+    ImGui::PushStyleColor(ImGuiCol_Text, pages > 1 ? kWhite : ImVec4(0.45f, 0.45f, 0.47f, 1.0f));
+    if (ImGui::Button("<", ImVec2(W * 0.095f, H * 0.13f)) && pages > 1) g_page = (g_page + pages - 1) % pages;
+    ImGui::SameLine();
+    if (ImGui::Button(">", ImVec2(W * 0.095f, H * 0.13f)) && pages > 1) g_page = (g_page + 1) % pages;
+    ImGui::PopStyleColor(3);
+    ImGui::PopStyleVar();
+    AddRect();
+    ImGui::End();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
 
     // ---- SALIR (arriba a la derecha) ----
     ImGui::SetNextWindowPos(ImVec2(W * 0.985f, H * 0.03f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
@@ -398,6 +415,25 @@ static bool InitImGui(float W, float H) {
     return true;
 }
 
+typedef void (*PFNBINDVAO)(GLuint);
+static PFNBINDVAO g_bindVao = nullptr;      // glBindVertexArray (si el juego usa ES3)
+static int g_swaps = 0, g_drawn = 0, g_noPlayer = 0, g_otherCtx = 0;
+
+static void LogGlState(const char* why, EGLContext ctx, int w, int h) {
+    GLint fbo = 0, vao = 0, vp[4] = {0, 0, 0, 0}, prog = 0;
+    GLboolean cm[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &fbo);
+    if (g_bindVao) glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &vao);
+    glGetIntegerv(GL_VIEWPORT, vp);
+    glGetIntegerv(GL_CURRENT_PROGRAM, &prog);
+    glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+    int sc = glIsEnabled(GL_SCISSOR_TEST) ? 1 : 0;
+    while (glGetError() != GL_NO_ERROR) {}
+    Log("estado %s: ctx=%p hilo=%d superficie=%dx%d fbo=%d vao=%d viewport=%d,%d,%d,%d prog=%d scissor=%d colormask=%d%d%d%d",
+        why, ctx, (int)syscall(SYS_gettid), w, h, fbo, vao, vp[0], vp[1], vp[2], vp[3], prog, sc,
+        (int)cm[0], (int)cm[1], (int)cm[2], (int)cm[3]);
+}
+
 static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
     if (g_failed) return;
     EGLContext ctx = eglGetCurrentContext();
@@ -409,12 +445,29 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
 
     if (!g_inited) {
         g_ctx = ctx;
+        g_bindVao = (PFNBINDVAO)eglGetProcAddress("glBindVertexArray");
+        if (!g_bindVao) g_bindVao = (PFNBINDVAO)eglGetProcAddress("glBindVertexArrayOES");
         if (!InitImGui((float)w, (float)h)) { g_failed = true; return; }
         g_inited = true;
         g_last = std::chrono::steady_clock::now();
+        Log("VAO disponible: %s", g_bindVao ? "si" : "no");
+        LogGlState("inicio", ctx, w, h);
     }
-    if (ctx != g_ctx) return;
-    if (FindPlayerPed && !FindPlayerPed(-1)) { g_open = false; std::lock_guard<std::mutex> lk(g_inMtx); g_rects.clear(); return; }
+    if (ctx != g_ctx) {
+        g_otherCtx++;
+        if (g_otherCtx <= 8) Log("contexto distinto al de ImGui: actual=%p ImGui=%p hilo=%d", ctx, g_ctx, (int)syscall(SYS_gettid));
+        return;
+    }
+    bool havePlayer = !FindPlayerPed || FindPlayerPed(-1) != nullptr;
+    static int lastHave = -1;
+    if ((int)havePlayer != lastHave) { lastHave = (int)havePlayer; Log("jugador %s", havePlayer ? "presente" : "ausente"); }
+    if (!havePlayer) {
+        g_noPlayer++;
+        g_open = false;
+        std::lock_guard<std::mutex> lk(g_inMtx);
+        g_rects.clear();
+        return;
+    }
 
     RefreshList();
 
@@ -433,9 +486,18 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
         if (e.kind == 2) io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
     }
 
-    GLint lastElem = 0, lastAttr[8] = {0};
+    // ---- guardar el estado de GL del juego y dejarlo limpio para ImGui ----
+    GLint maxAttr = 8, lastElem = 0, lastVao = 0, lastAttr[16] = {0};
+    GLboolean cm[4] = {1, 1, 1, 1};
+    glGetIntegerv(GL_MAX_VERTEX_ATTRIBS, &maxAttr);
+    if (maxAttr > 16) maxAttr = 16;
     glGetIntegerv(GL_ELEMENT_ARRAY_BUFFER_BINDING, &lastElem);
-    for (int i = 0; i < 8; i++) glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &lastAttr[i]);
+    for (int i = 0; i < maxAttr; i++) glGetVertexAttribiv(i, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &lastAttr[i]);
+    glGetBooleanv(GL_COLOR_WRITEMASK, cm);
+    if (g_bindVao) { glGetIntegerv(0x85B5 /* GL_VERTEX_ARRAY_BINDING */, &lastVao); g_bindVao(0); }
+    for (int i = 0; i < maxAttr; i++) glDisableVertexAttribArray(i);
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    while (glGetError() != GL_NO_ERROR) {}
 
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
@@ -443,20 +505,33 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
     ImGui::Render();
     ImDrawData* dd = ImGui::GetDrawData();
     ImGui_ImplOpenGL3_RenderDrawData(dd);
-    static int nFrames = 0;
-    if (nFrames < 3 || nFrames % 1200 == 0)
-        Log("frame %d: vertices=%d rects=%zu abierto=%d", nFrames, dd ? dd->TotalVtxCount : -1, g_frameRects.size(), (int)g_open);
-    nFrames++;
 
+    GLenum err = glGetError();
+    static int errLogs = 0;
+    if (err != GL_NO_ERROR && errLogs++ < 10) Log("glGetError tras dibujar = 0x%x", err);
+    static int nFrames = 0;
+    if (nFrames < 3 || nFrames % 600 == 0) {
+        Log("frame %d: vertices=%d rects=%zu abierto=%d", nFrames, dd ? dd->TotalVtxCount : -1, g_frameRects.size(), (int)g_open);
+        LogGlState("dibujo", ctx, w, h);
+    }
+    nFrames++;
+    g_drawn++;
+
+    // ---- devolver el estado al juego ----
+    if (g_bindVao) g_bindVao((GLuint)lastVao);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, (GLuint)lastElem);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < maxAttr; i++) {
         if (lastAttr[i]) glEnableVertexAttribArray(i); else glDisableVertexAttribArray(i);
     }
+    glColorMask(cm[0], cm[1], cm[2], cm[3]);
     { std::lock_guard<std::mutex> lk(g_inMtx); g_rects = g_frameRects; }
 }
 
 static EGLBoolean eglSwapBuffers_hook(EGLDisplay d, EGLSurface s) {
+    g_swaps++;
     DrawMenu(d, s);
+    if (g_swaps % 900 == 0)
+        Log("swaps=%d dibujados=%d sin_jugador=%d otro_contexto=%d", g_swaps, g_drawn, g_noPlayer, g_otherCtx);
     return eglSwapBuffers_orig(d, s);
 }
 
@@ -470,7 +545,7 @@ extern "C" void OnModLoad() {
     g_plugDir = files + "/VestidorSA";
     mkdir(g_plugDir.c_str(), 0777);
     FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
-    Log("== Vestidor SA Menu 1.4.0 cargado ==");
+    Log("== Vestidor SA Menu 1.5.0 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
