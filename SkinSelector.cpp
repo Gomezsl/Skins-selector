@@ -19,7 +19,7 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.7.0, Tu nombre)
+MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.8.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSA"
@@ -199,6 +199,38 @@ static void ClearDuck(void* ped) {
     if (!ClearTaskDuckSecondary) return;
     void* in = FindIntelligence(ped);
     if (in) ClearTaskDuckSecondary(in);
+}
+
+// ---- el cambio de modelo destruye las animaciones: agachado, peleando, en coche, saltando... deja al jugador atascado ----
+static std::string g_status;        // texto de status.txt (el menu lo muestra); vacio = libre
+static int g_busySince = 0;
+static int g_layoutLogs = 0;
+
+static void WriteStatus(const std::string& st) {
+    if (st == g_status) return;
+    g_status = st;
+    FILE* f = fopen((g_plugDir + "/status.txt").c_str(), "w");
+    if (f) { fputs(st.c_str(), f); fclose(f); }
+}
+
+// CPedIntelligence = { CPed* m_pPed; CTaskManager { CTask* primarias[5]; CTask* secundarias[6]; CPed* m_pPed; } ... }
+static bool PlayerBusy(void* ped, std::string* why) {
+    void* in = FindIntelligence(ped);
+    if (!in || !Readable(in, 8 * 13)) return false;
+    uint64_t q[13];
+    memcpy(q, in, sizeof q);
+    bool layoutOk = ((q[12] & kPtrMask) == ((uintptr_t)ped & kPtrMask)) && q[5] != 0;   // m_pPed al final y tarea por defecto presente
+    if (g_layoutLogs < 6) {
+        g_layoutLogs++;
+        LOGI("  tareas: primarias=%d%d%d%d%d secundarias=%d%d%d%d%d%d diseno=%s", q[1] != 0, q[2] != 0, q[3] != 0, q[4] != 0,
+             q[5] != 0, q[6] != 0, q[7] != 0, q[8] != 0, q[9] != 0, q[10] != 0, q[11] != 0, layoutOk ? "ok" : "NO COINCIDE");
+    }
+    if (!layoutOk) return false;
+    if (q[6]) { *why = "peleando"; return true; }
+    if (q[7]) { *why = "agachado"; return true; }
+    for (int i = 0; i < 4; i++)
+        if (q[1 + i]) { *why = "ocupado"; return true; }
+    return false;
 }
 
 static int ReadPedModel(void* ped) {
@@ -423,12 +455,25 @@ static void Watchdog() {
         g_prevMission = om;
     }
 
-    // peticiones explicitas: esperan a que acabe la cinematica o la carga
+    // peticiones explicitas: esperan a que acabe la cinematica o la carga, y a que el jugador este libre
     int p = g_pending.load();
     if (p != -2 && !cut && !loading) {
-        if (ApplySkin(p, g_force.load())) {
-            g_pending = -2;
-            unlink((g_plugDir + "/request.working").c_str());   // llegamos aqui = no hubo crash
+        std::string why;
+        if (PlayerBusy(ped, &why)) {
+            if (g_busySince == 0) { g_busySince = g_frame; LOGI("esperando: el jugador esta %s (cambiar el modelo ahora lo dejaria atascado)", why.c_str()); }
+            WriteStatus(why);
+            if (g_frame - g_busySince > 1200) {
+                LOGI("se cancela el cambio: el jugador siguio ocupado (%s)", why.c_str());
+                g_pending = -2; g_busySince = 0; WriteStatus("");
+                unlink((g_plugDir + "/request.working").c_str());
+            }
+        } else {
+            g_busySince = 0;
+            WriteStatus("");
+            if (ApplySkin(p, g_force.load())) {
+                g_pending = -2;
+                unlink((g_plugDir + "/request.working").c_str());   // llegamos aqui = no hubo crash
+            }
         }
     }
 
@@ -446,6 +491,14 @@ static void Watchdog() {
         if (g_reapplyDelay > 0) {
             g_reapplyDelay--;
         } else if (g_frame >= g_nextTryFrame) {
+            std::string why;
+            if (PlayerBusy(ped, &why)) {
+                static int lastBusyLog = -1000;
+                if (g_frame - lastBusyLog > 600) { lastBusyLog = g_frame; LOGI("reaplicado en espera: el jugador esta %s", why.c_str()); }
+                WriteStatus(why);
+                return;
+            }
+            WriteStatus("");
             g_nextTryFrame = g_frame + 90;
             if (++g_autoTries > 3) {
                 g_giveUp = true; g_needReapply = false;
@@ -507,8 +560,9 @@ extern "C" void OnModLoad() {
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
     LoadSettings();
+    unlink((g_plugDir + "/status.txt").c_str());   // sin estado "esperando" de la sesion anterior
     WriteCurrent("CJ");   // proceso nuevo = CJ; si "recordar" esta activo, current.txt se actualiza al reaplicar
-    LOGI("== Vestidor SA 1.7.0 cargado (OnModLoad) ==");
+    LOGI("== Vestidor SA 1.8.0 cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 

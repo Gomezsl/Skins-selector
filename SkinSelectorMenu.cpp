@@ -25,7 +25,7 @@
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 
-MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 1.6.0, Tu nombre)
+MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 1.7.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSAMenu"
@@ -113,6 +113,7 @@ static std::vector<std::string> g_skinsM;
 static std::string g_current = "CJ";
 static std::string g_title = "VESTIDOR SA";
 static bool g_remember = false;
+static std::string g_status;
 static time_t g_lastRead = 0;
 static std::mutex g_listMtx;
 
@@ -146,6 +147,7 @@ static void RefreshList() {
         fclose(f);
     }
     std::string cur = ReadFirstLine(g_plugDir + "/current.txt");
+    std::string status = ReadFirstLine(g_plugDir + "/status.txt");
     bool rem = false;
     std::string title;
     FILE* sf = fopen((g_plugDir + "/settings.txt").c_str(), "r");
@@ -163,6 +165,7 @@ static void RefreshList() {
     std::lock_guard<std::mutex> lk(g_listMtx);
     g_skinsM = skins;
     g_remember = rem;
+    g_status = status;
     if (!title.empty()) g_title = title;
     if (!cur.empty()) g_current = cur;
 }
@@ -253,7 +256,8 @@ static void BuildUI(float W, float H, float k) {
     std::vector<std::string> skins;
     std::string cur, title;
     bool rem;
-    { std::lock_guard<std::mutex> lk(g_listMtx); skins = g_skinsM; cur = g_current; title = g_title; rem = g_remember; }
+    std::string status;
+    { std::lock_guard<std::mutex> lk(g_listMtx); skins = g_skinsM; cur = g_current; title = g_title; rem = g_remember; status = g_status; }
 
     const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
                                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
@@ -340,7 +344,8 @@ static void BuildUI(float W, float H, float k) {
     else snprintf(hint, sizeof hint, "Toca una opcion");
     ImGui::SetCursorPos(ImVec2(pad, ImGui::GetWindowHeight() - bh - pad - 30.0f * k));
     ImGui::SetWindowFontScale(0.7f);
-    ImGui::TextColored(kGrey, "%s", hint);
+    if (!status.empty()) ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.2f, 1.0f), "Esperando: jugador %s...", status.c_str());
+    else ImGui::TextColored(kGrey, "%s", hint);
     ImGui::SetWindowFontScale(1.0f);
     ImGui::SetCursorPos(ImVec2(pad, ImGui::GetWindowHeight() - bh - pad));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.22f, 0.24f, 1.0f));
@@ -572,7 +577,7 @@ extern "C" void OnModLoad() {
     g_plugDir = files + "/VestidorSA";
     mkdir(g_plugDir.c_str(), 0777);
     FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
-    Log("== Vestidor SA Menu 1.6.0 cargado ==");
+    Log("== Vestidor SA Menu 1.7.0 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
