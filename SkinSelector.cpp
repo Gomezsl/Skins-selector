@@ -60,7 +60,7 @@ static void  (*RebuildPlayer)(void*, bool);           // CClothes::RebuildPlayer
 static void* (*GetModelInfoByName)(const char*, int*);   // CModelInfo::GetModelInfo(name, &index)
 static void  (*CGame_Process_orig)();
 
-static int g_slot = 1;          // slot de personaje especial (1 normal; 10 con "skin en misiones" para no chocar con los de las misiones)
+static int g_slot = 1;          // slot de personaje especial (1 normal; 9 con "skin en misiones" para no chocar con los de las misiones)
 static bool g_missions = false; // opcion: mantener la skin tambien durante las misiones
 
 // ---- estado --------------------------------------------------------------------------------------
@@ -107,7 +107,7 @@ static void LoadSettings() {
         std::string l = line;
         while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ')) l.pop_back();
         if (l.rfind("remember=", 0) == 0) g_remember = (l.substr(9) == "1");
-        else if (l.rfind("missions=", 0) == 0) { g_missions = (l.substr(9) == "1"); g_slot = g_missions ? 10 : 1; }
+        else if (l.rfind("missions=", 0) == 0) { g_missions = (l.substr(9) == "1"); g_slot = g_missions ? 9 : 1; }
         else if (l.rfind("last=", 0) == 0) g_lastName = l.substr(5);
     }
     fclose(f);
@@ -136,6 +136,7 @@ static void Rescan() {
 
 // Debe llamarse en el hilo del juego (lo hacemos desde el hook de CGame::Process).
 static std::atomic<bool> g_noDelete{false};
+static void* g_pedVtbl = nullptr;   // vtable de CPedModelInfo (se toma de "male01")
 
 static int ReadPedModel(void* ped) {
     if (g_miOff < 0 || !ped) return -1;
@@ -144,6 +145,7 @@ static int ReadPedModel(void* ped) {
     return v;
 }
 
+static bool ApplySkin(int idx, bool force);
 static bool ApplySkin(int idx, bool force = false) {
     void* ped = FindPlayerPed(-1);
     if (!ped) return false;                       // aun no hay jugador (menu / carga): se reintenta
@@ -185,6 +187,19 @@ static bool ApplySkin(int idx, bool force = false) {
         if (GetModelInfoByName && !mi && !force) {
             LOGI("  el juego no registro el nombre '%s' como modelo: no se aplica", name.c_str());
             return true;
+        }
+        if (mi && GetModelInfoByName) {   // el modelo debe ser un CPedModelInfo (el slot 10 -> id 300 no lo es y crashea)
+            if (!g_pedVtbl) {
+                int vi = -1;
+                void* ref = GetModelInfoByName("male01", &vi);
+                if (ref) g_pedVtbl = *(void**)ref;
+                LOGI("  referencia de ped (male01, id %d): vtable %p", vi, g_pedVtbl);
+            }
+            if (g_pedVtbl && *(void**)mi != g_pedVtbl && !force) {
+                LOGI("  el modelo %u (slot %d) NO es un ped (vtable %p): no se aplica", modelId, g_slot, *(void**)mi);
+                if (g_slot != 1) { g_slot = 1; LOGI("  se usa el slot 1"); return ApplySkin(idx, force); }
+                return true;
+            }
         }
         if (mi) {
             const uint64_t* q = (const uint64_t*)mi;
@@ -271,7 +286,7 @@ static void PollRequestFile() {
     }
     if (l == "missions_on" || l == "missions_off") {
         g_missions = (l == "missions_on");
-        g_slot = g_missions ? 10 : 1;
+        g_slot = g_missions ? 9 : 1;
         SaveSettings();
         LOGI("skin en misiones: %s (slot %d)", g_missions ? "SI" : "NO", g_slot);
         if (g_desired >= 0) { g_needReapply = true; g_reapplyDelay = 10; g_giveUp = false; g_autoTries = 0; }
@@ -416,7 +431,7 @@ extern "C" void OnModLoad() {
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
     LoadSettings();
-    LOGI("== SkinSelector 1.3.0 cargado (OnModLoad) ==");
+    LOGI("== SkinSelector 1.3.1 cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
