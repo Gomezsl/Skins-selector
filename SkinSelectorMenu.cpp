@@ -162,20 +162,15 @@ static std::mutex g_inMtx;
 static std::vector<Rect> g_rects;
 static std::vector<TouchEv> g_evs;
 static bool g_cap[16];
-static int g_androidMode = -1;   // -1 desconocido, 0 = (1 abajo, 2 mover, 3 arriba), 1 = acciones de Android (0 abajo, 1 arriba)
 static uintptr_t (*AND_TouchEvent_orig)(int, int, int, int);
 
 static uintptr_t AND_TouchEvent_hook(int type, int idx, int x, int y) {
     static int logged = 0;
     if (logged < 60) { logged++; Log("touch type=%d idx=%d x=%d y=%d", type, idx, x, y); }
 
-    bool down = false, up = false;
-    if (type == 0 || type == 5) { g_androidMode = 1; down = true; }
-    else if (type == 1) {
-        if (g_androidMode < 0) g_androidMode = 0;
-        if (g_androidMode == 1) up = true; else down = true;
-    }
-    else if (type == 3 || type == 6) up = true;
+    // segun el log real: cada toque empieza con type=2, se mueve con type=3 y termina con type=1
+    bool down = (type == 2);
+    bool up = (type == 1 || type == 4);
 
     bool swallow = false;
     if (idx >= 0 && idx < 16) {
@@ -183,7 +178,11 @@ static uintptr_t AND_TouchEvent_hook(int type, int idx, int x, int y) {
         if (down) {
             for (auto& r : g_rects)
                 if (x >= r.x0 && x <= r.x1 && y >= r.y0 && y <= r.y1) { g_cap[idx] = true; break; }
-            if (g_cap[idx]) { g_evs.push_back({0, (float)x, (float)y}); g_evs.push_back({1, 0, 0}); swallow = true; }
+            if (g_cap[idx]) {
+                static int caps = 0;
+                if (caps++ < 20) Log("toque capturado por el menu: idx=%d x=%d y=%d", idx, x, y);
+                g_evs.push_back({0, (float)x, (float)y}); g_evs.push_back({1, 0, 0}); swallow = true;
+            }
         } else if (g_cap[idx]) {
             swallow = true;
             g_evs.push_back({0, (float)x, (float)y});
@@ -332,7 +331,12 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
     ImGui::NewFrame();
     BuildUI((float)w, (float)h, h / 1080.0f);
     ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    ImDrawData* dd = ImGui::GetDrawData();
+    ImGui_ImplOpenGL3_RenderDrawData(dd);
+    static int nFrames = 0;
+    if (nFrames < 3 || nFrames % 1200 == 0)
+        Log("frame %d: vertices=%d rects=%zu abierto=%d", nFrames, dd ? dd->TotalVtxCount : -1, g_frameRects.size(), (int)g_open);
+    nFrames++;
 
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, (GLuint)lastElem);
     for (int i = 0; i < 8; i++) {
@@ -356,7 +360,7 @@ extern "C" void OnModLoad() {
     g_plugDir = files + "/SkinSelector";
     mkdir(g_plugDir.c_str(), 0777);
     FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
-    Log("== SkinSelectorMenu 1.0.0 cargado ==");
+    Log("== SkinSelectorMenu 1.0.1 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
