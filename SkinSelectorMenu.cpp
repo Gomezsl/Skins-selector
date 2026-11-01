@@ -109,6 +109,7 @@ static bool PatchGot(const char* libName, const char* sym, void* repl, void** or
 // ---- lista de skins (la escribe SkinSelector en skins_list.txt) -----------------------------------
 static std::vector<std::string> g_names;
 static std::string g_current = "CJ";
+static bool g_remember = false;
 static time_t g_lastRead = 0;
 static std::mutex g_listMtx;
 
@@ -142,7 +143,15 @@ static void RefreshList() {
         fclose(f);
     }
     std::string cur = ReadFirstLine(g_plugDir + "/current.txt");
+    bool rem = false;
+    FILE* sf = fopen((g_plugDir + "/settings.txt").c_str(), "r");
+    if (sf) {
+        char sl[200];
+        while (fgets(sl, sizeof sl, sf)) if (strncmp(sl, "remember=", 9) == 0) rem = (sl[9] == '1');
+        fclose(sf);
+    }
     std::lock_guard<std::mutex> lk(g_listMtx);
+    g_remember = rem;
     g_names = names;
     if (!cur.empty()) g_current = cur;
 }
@@ -225,7 +234,7 @@ static void BuildUI(float W, float H, float k) {
     std::string cur;
     { std::lock_guard<std::mutex> lk(g_listMtx); names = g_names; cur = g_current; }
 
-    const int perPage = 5;
+    const int perPage = 4;
     int pages = (int)((names.size() + perPage - 1) / perPage);
     if (pages < 1) pages = 1;
     if (g_page >= pages) g_page = pages - 1;
@@ -262,6 +271,18 @@ static void BuildUI(float W, float H, float k) {
     ImGui::Button(pg, ImVec2(half, bh * 0.8f));
     ImGui::SameLine();
     if (ImGui::Button(">", ImVec2(half, bh * 0.8f))) g_page = (g_page + 1) % pages;
+    {
+        bool rem;
+        { std::lock_guard<std::mutex> lk(g_listMtx); rem = g_remember; }
+        char rb[48];
+        snprintf(rb, sizeof rb, "Recordar ultima skin: %s", rem ? "SI" : "NO");
+        if (rem) ImGui::PushStyleColor(ImGuiCol_Button, on);
+        if (ImGui::Button(rb, ImVec2(-1, bh * 0.8f))) {
+            { std::lock_guard<std::mutex> lk(g_listMtx); g_remember = !rem; g_lastRead = time(nullptr); }
+            Request(rem ? "REMEMBER_OFF" : "REMEMBER_ON");
+        }
+        if (rem) ImGui::PopStyleColor();
+    }
     if (ImGui::Button("Cerrar", ImVec2(-1, bh * 0.8f))) g_open = false;
     AddRect();
     ImGui::End();
@@ -360,7 +381,7 @@ extern "C" void OnModLoad() {
     g_plugDir = files + "/SkinSelector";
     mkdir(g_plugDir.c_str(), 0777);
     FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
-    Log("== SkinSelectorMenu 1.0.1 cargado ==");
+    Log("== SkinSelectorMenu 1.1.0 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");

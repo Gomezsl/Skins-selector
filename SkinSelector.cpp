@@ -72,9 +72,43 @@ static int g_prevMission = 0;
 static int g_missionLogs = 0;
 static const int kOnMissionVar = 408;      // $ONMISSION en 2.10 (lo dice el log de ZyZ)
 
+static int g_desired = -1;                 // skin que el jugador quiere llevar (-1 = CJ); sobrevive a cinematicas, misiones y guardados
+static bool g_remember = false;            // opcion "recordar": mantener la ultima skin entre partidas e inicios del juego
+static std::string g_lastName = "CJ";      // ultima skin elegida (se guarda en settings.txt)
+static bool g_needReapply = false;
+static int g_reapplyDelay = 0;
+static int g_autoTries = 0;
+static bool g_giveUp = false;
+static int g_nextTryFrame = 0;
+static int g_miOff = -1;                   // offset de CEntity::m_nModelIndex dentro del ped (se calibra solo)
+static unsigned g_wornModelId = 0;
+static const volatile uint8_t* g_cutPtr = nullptr;    // CCutsceneMgr::ms_running
+static const volatile uint8_t* g_loadPtr = nullptr;   // CGenericGameStorage::ms_bLoading
+static bool g_prevCut = false, g_prevLoading = false, g_sessionPending = false;
+static int g_nullFrames = 0;
+
 static void WriteCurrent(const char* name) {   // el menu lee esto para marcar la skin activa
     FILE* f = fopen((g_plugDir + "/current.txt").c_str(), "w");
     if (f) { fputs(name, f); fclose(f); }
+}
+
+static void SaveSettings() {
+    FILE* f = fopen((g_plugDir + "/settings.txt").c_str(), "w");
+    if (!f) return;
+    fprintf(f, "remember=%d\nlast=%s\n", g_remember ? 1 : 0, g_lastName.c_str());
+    fclose(f);
+}
+static void LoadSettings() {
+    FILE* f = fopen((g_plugDir + "/settings.txt").c_str(), "r");
+    if (!f) return;
+    char line[300];
+    while (fgets(line, sizeof line, f)) {
+        std::string l = line;
+        while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ')) l.pop_back();
+        if (l.rfind("remember=", 0) == 0) g_remember = (l.substr(9) == "1");
+        else if (l.rfind("last=", 0) == 0) g_lastName = l.substr(5);
+    }
+    fclose(f);
 }
 
 static void WriteList() {
@@ -101,6 +135,13 @@ static void Rescan() {
 // Debe llamarse en el hilo del juego (lo hacemos desde el hook de CGame::Process).
 static std::atomic<bool> g_noDelete{false};
 
+static int ReadPedModel(void* ped) {
+    if (g_miOff < 0 || !ped) return -1;
+    uint16_t v;
+    memcpy(&v, (const char*)ped + g_miOff, sizeof v);
+    return v;
+}
+
 static bool ApplySkin(int idx, bool force = false) {
     void* ped = FindPlayerPed(-1);
     if (!ped) return false;                       // aun no hay jugador (menu / carga): se reintenta
@@ -108,6 +149,7 @@ static bool ApplySkin(int idx, bool force = false) {
         if (DeleteRwObject) DeleteRwObject(ped);
         SetModelIndex(ped, 0);
         if (RebuildPlayer) RebuildPlayer(ped, false);
+        if (g_miOff >= 0 && ReadPedModel(ped) != 0) { LOGI("  calibracion del modelo invalida (leo %d con CJ)", ReadPedModel(ped)); g_miOff = -1; }
         g_curSkin = -1;
         WriteCurrent("CJ");
         LOGI("skin: CJ");
@@ -160,6 +202,25 @@ static bool ApplySkin(int idx, bool force = false) {
     LOGI("  SetModelIndex(ped=%p, modelo=%u)", ped, modelId);
     SetModelIndex(ped, modelId);
     LOGI("  SetModelIndex termino sin crash");
+    if (g_miOff >= 0 && ReadPedModel(ped) != (int)modelId) {
+        LOGI("  calibracion del modelo invalida (leo %d, esperaba %u)", ReadPedModel(ped), modelId);
+        g_miOff = -1;
+    }
+    if (g_miOff < 0) {   // busca donde guarda el ped su indice de modelo (uint16 == modelId)
+        int found[8], n = 0, pick = -1;
+        for (int o = 0x20; o < 0x100 && n < 8; o += 2) {
+            uint16_t v;
+            memcpy(&v, (const char*)ped + o, sizeof v);
+            if (v == modelId) found[n++] = o;
+        }
+        LOGI("  calibracion m_nModelIndex: %d candidato(s)", n);
+        for (int i = 0; i < n; i++) { LOGI("    +0x%02x", found[i]); if (found[i] == 0x2E) pick = 0x2E; }
+        if (pick < 0 && n == 1) pick = found[0];
+        g_miOff = pick;
+        if (pick >= 0) LOGI("  m_nModelIndex calibrado en ped+0x%02x", pick);
+        else LOGI("  m_nModelIndex SIN calibrar: no se detectan resets por modelo (solo por cinematica/mision/carga)");
+    }
+    g_wornModelId = modelId;
     SetMissionDoesntRequireSpecialChar(kSlot);
     g_curSkin = idx;
     WriteCurrent(name.c_str());
@@ -168,6 +229,15 @@ static bool ApplySkin(int idx, bool force = false) {
 }
 
 static std::atomic<bool> g_force{false};
+
+// El jugador elige una skin (-1 = CJ): se aplica y pasa a ser la deseada.
+static void Choose(int idx) {
+    g_pending = idx;
+    g_desired = idx;
+    g_lastName = idx >= 0 ? g_skins[idx].name : "CJ";
+    g_needReapply = false; g_giveUp = false; g_autoTries = 0;
+    SaveSettings();
+}
 
 static void PollRequestFile() {
     std::string p = g_plugDir + "/request.txt";
@@ -190,37 +260,119 @@ static void PollRequestFile() {
     std::string l = skinscan::Lower(s);
     auto done = [&]() { unlink(w.c_str()); };
     if (l.empty()) { done(); return; }
-    if (l == "cj" || l == "default" || l == "0") { g_pending = -1; return; }
+    if (l == "remember_on" || l == "remember_off") {
+        g_remember = (l == "remember_on");
+        SaveSettings();
+        LOGI("recordar ultima skin: %s", g_remember ? "SI" : "NO");
+        done();
+        return;
+    }
+    if (l == "cj" || l == "default" || l == "0") { Choose(-1); return; }
     if (l == "rescan") { Rescan(); done(); return; }
-    if (l.find_first_not_of("0123456789") == std::string::npos) { g_pending = atoi(l.c_str()) - 1; return; }
+    if (l.find_first_not_of("0123456789") == std::string::npos) {
+        int n = atoi(l.c_str()) - 1;
+        if (n >= 0 && n < (int)g_skins.size()) { Choose(n); return; }
+        LOGI("request: numero %s fuera de la lista", l.c_str());
+        done();
+        return;
+    }
     for (size_t i = 0; i < g_skins.size(); i++)
-        if (skinscan::Lower(g_skins[i].name) == l) { g_pending = (int)i; return; }
+        if (skinscan::Lower(g_skins[i].name) == l) { Choose((int)i); return; }
     LOGI("request: '%s' no es una skin conocida (el archivo debe contener solo el nombre, ej: sold)", s.c_str());
     done();
+}
+
+static bool ReadFlag(const volatile uint8_t* p) { return p && *p != 0; }
+
+// El juego recreo al jugador (partida nueva o cargada).
+static void OnNewSession() {
+    g_curSkin = -1;
+    g_giveUp = false; g_autoTries = 0;
+    if (!g_remember) {
+        g_desired = -1; g_lastName = "CJ"; g_needReapply = false;
+        SaveSettings();
+        WriteCurrent("CJ");
+        LOGI("partida nueva/cargada: recordar=NO, se queda CJ");
+    } else {
+        g_needReapply = g_desired >= 0;
+        g_reapplyDelay = 150;
+        LOGI("partida nueva/cargada: recordar=SI, skin pendiente: %s", g_lastName.c_str());
+    }
+}
+
+static void Watchdog() {
+    void* ped = FindPlayerPed(-1);
+    bool cut = ReadFlag(g_cutPtr), loading = ReadFlag(g_loadPtr);
+
+    if (loading && !g_prevLoading) g_sessionPending = true;
+    g_prevLoading = loading;
+    if (!ped) { if (g_nullFrames < 1000) g_nullFrames++; g_prevCut = cut; return; }
+    if (g_nullFrames >= 5) g_sessionPending = true;
+    g_nullFrames = 0;
+    if (g_sessionPending && !loading) { g_sessionPending = false; OnNewSession(); }
+
+    if (g_prevCut && !cut) {   // fin de cinematica: el juego dejo a CJ, se vuelve a poner la skin
+        LOGI("cinematica terminada");
+        if (g_desired >= 0) { g_needReapply = true; g_reapplyDelay = 45; g_giveUp = false; g_autoTries = 0; }
+    }
+    g_prevCut = cut;
+
+    int om = g_prevMission;
+    if (g_scriptSpace) memcpy(&om, g_scriptSpace + kOnMissionVar * 4, sizeof om);
+    if (g_scriptSpace && om != g_prevMission) {
+        if (g_missionLogs++ < 20) LOGI("ONMISSION %d -> %d", g_prevMission, om);
+        if (om != 0 && g_prevMission == 0 && g_curSkin >= 0 && g_pending.load() == -2) {
+            LOGI("mision iniciada: se vuelve a CJ (la skin deseada se conserva)");
+            g_pending = -1;     // g_desired no cambia
+        }
+        if (om == 0 && g_prevMission != 0 && g_desired >= 0) {
+            LOGI("mision terminada");
+            g_needReapply = true; g_reapplyDelay = 60; g_giveUp = false; g_autoTries = 0;
+        }
+        g_prevMission = om;
+    }
+
+    // peticiones explicitas: esperan a que acabe la cinematica o la carga
+    int p = g_pending.load();
+    if (p != -2 && !cut && !loading) {
+        if (ApplySkin(p, g_force.load())) {
+            g_pending = -2;
+            unlink((g_plugDir + "/request.working").c_str());   // llegamos aqui = no hubo crash
+        }
+    }
+
+    bool allowed = !cut && !loading && om == 0 && g_pending.load() == -2;
+    if (allowed && g_desired >= 0 && g_curSkin == g_desired && g_miOff >= 0) {
+        int cur = ReadPedModel(ped);   // el guardado o la carga pudieron devolver al jugador a CJ
+        if (cur != (int)g_wornModelId) {
+            static int mlog = 0;
+            if (mlog++ < 20) LOGI("el modelo del jugador cambio a %d (esperado %u): se vuelve a poner la skin", cur, g_wornModelId);
+            g_curSkin = -1;
+            g_needReapply = true; g_reapplyDelay = 20;
+        }
+    }
+    if (g_needReapply && allowed && g_desired >= 0 && g_desired < (int)g_skins.size() && !g_giveUp) {
+        if (g_reapplyDelay > 0) {
+            g_reapplyDelay--;
+        } else if (g_frame >= g_nextTryFrame) {
+            g_nextTryFrame = g_frame + 90;
+            if (++g_autoTries > 3) {
+                g_giveUp = true; g_needReapply = false;
+                LOGI("no se pudo mantener la skin tras 3 intentos: se detiene el reintento automatico");
+            } else {
+                LOGI("reaplicando '%s' (intento %d)", g_skins[g_desired].name.c_str(), g_autoTries);
+                if (ApplySkin(g_desired)) g_needReapply = false;
+            }
+        }
+    }
 }
 
 static void CGame_Process_hook() {
     CGame_Process_orig();
     if (g_frame == 0) LOGI("hook de CGame::Process activo");
-    if (++g_frame % 15 == 0) PollRequestFile();
-    int p = g_pending.load();
-    if (p != -2 && ApplySkin(p, g_force.load())) {
-        g_pending = -2;
-        unlink((g_plugDir + "/request.working").c_str());   // llegamos aqui = no hubo crash
-    }
-    // al empezar una mision se vuelve a CJ (las misiones usan los slots de personajes especiales)
-    if (g_scriptSpace && FindPlayerPed(-1)) {
-        int32_t om;
-        memcpy(&om, g_scriptSpace + kOnMissionVar * 4, sizeof om);
-        if (om != g_prevMission) {
-            if (g_missionLogs++ < 20) LOGI("ONMISSION %d -> %d", g_prevMission, om);
-            if (om != 0 && g_prevMission == 0 && g_curSkin >= 0 && g_pending.load() == -2) {
-                LOGI("mision iniciada: se vuelve a CJ");
-                g_pending = -1;
-            }
-            g_prevMission = om;
-        }
-    }
+    ++g_frame;
+    if (g_frame % 15 == 0) PollRequestFile();
+    Watchdog();
 }
 
 // ---- menu SAUtils (opcional) --------------------------------------------------------------------
@@ -252,7 +404,9 @@ extern "C" void OnModLoad() {
         FILE* lf = fopen((g_plugDir + "/log.txt").c_str(), "w"); if (lf) fclose(lf);
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
-    LOGI("== SkinSelector 1.1.0 cargado (OnModLoad) ==");
+    LoadSettings();
+    LOGI("== SkinSelector 1.2.0 cargado (OnModLoad) ==");
+    LOGI("recordar ultima skin: %s, ultima: %s", g_remember ? "SI" : "NO", g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
     void* h = aml->GetLibHandle("libGTASA.so");
@@ -268,11 +422,22 @@ extern "C" void OnModLoad() {
     SYM(GetModelInfoByName,             "_ZN10CModelInfo12GetModelInfoEPKcPi");
     g_scriptSpace = (uint8_t*)aml->GetSym(h, "_ZN11CTheScripts11ScriptSpaceE");
     LOGI("  %s _ZN11CTheScripts11ScriptSpaceE", g_scriptSpace ? "ok     " : "FALTA  ");
+    g_cutPtr = (const volatile uint8_t*)aml->GetSym(h, "_ZN12CCutsceneMgr10ms_runningE");
+    g_loadPtr = (const volatile uint8_t*)aml->GetSym(h, "_ZN19CGenericGameStorage11ms_bLoadingE");
+    LOGI("  %s CCutsceneMgr::ms_running, %s CGenericGameStorage::ms_bLoading", g_cutPtr ? "ok" : "FALTA", g_loadPtr ? "ok" : "FALTA");
     void* process = (void*)aml->GetSym(h, "_ZN5CGame7ProcessEv");
     LOGI("  %s _ZN5CGame7ProcessEv", process ? "ok     " : "FALTA  ");
     #undef SYM
 
     Rescan();   // lista las skins aunque falte algun simbolo
+    if (g_remember && g_lastName != "CJ") {   // recordar: volver a querer la ultima skin
+        for (size_t i = 0; i < g_skins.size(); i++)
+            if (skinscan::Lower(g_skins[i].name) == skinscan::Lower(g_lastName)) {
+                g_desired = (int)i; g_needReapply = true; g_reapplyDelay = 150;
+                LOGI("ultima skin recordada: %s", g_lastName.c_str());
+                break;
+            }
+    }
 
     if (!RequestSpecialChar || !LoadAllRequestedModels || !HasSpecialCharLoaded ||
         !SetMissionDoesntRequireSpecialChar || !FindPlayerPed || !SetModelIndex || !process) {
