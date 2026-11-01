@@ -5,6 +5,7 @@
 #include <android/log.h>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <cstdarg>
 #include <cstdlib>
 #include <string>
@@ -65,6 +66,16 @@ static const int kSlot = 1;  // slot de personaje especial 1 -> modelo 290
 static std::vector<skinscan::Skin> g_skins;
 static std::atomic<int> g_pending{-2};   // -2 nada, -1 volver a CJ, >=0 indice en g_skins
 static int g_frame = 0;
+static int g_curSkin = -1;                 // -1 = CJ, >=0 indice de la skin puesta
+static uint8_t* g_scriptSpace = nullptr;   // CTheScripts::ScriptSpace (para detectar misiones)
+static int g_prevMission = 0;
+static int g_missionLogs = 0;
+static const int kOnMissionVar = 408;      // $ONMISSION en 2.10 (lo dice el log de ZyZ)
+
+static void WriteCurrent(const char* name) {   // el menu lee esto para marcar la skin activa
+    FILE* f = fopen((g_plugDir + "/current.txt").c_str(), "w");
+    if (f) { fputs(name, f); fclose(f); }
+}
 
 static void WriteList() {
     std::string p = g_plugDir + "/skins_list.txt";
@@ -97,6 +108,8 @@ static bool ApplySkin(int idx, bool force = false) {
         if (DeleteRwObject) DeleteRwObject(ped);
         SetModelIndex(ped, 0);
         if (RebuildPlayer) RebuildPlayer(ped, false);
+        g_curSkin = -1;
+        WriteCurrent("CJ");
         LOGI("skin: CJ");
         return true;
     }
@@ -148,6 +161,8 @@ static bool ApplySkin(int idx, bool force = false) {
     SetModelIndex(ped, modelId);
     LOGI("  SetModelIndex termino sin crash");
     SetMissionDoesntRequireSpecialChar(kSlot);
+    g_curSkin = idx;
+    WriteCurrent(name.c_str());
     LOGI("skin: %s", name.c_str());
     return true;
 }
@@ -187,11 +202,24 @@ static void PollRequestFile() {
 static void CGame_Process_hook() {
     CGame_Process_orig();
     if (g_frame == 0) LOGI("hook de CGame::Process activo");
-    if (++g_frame % 45 == 0) PollRequestFile();
+    if (++g_frame % 15 == 0) PollRequestFile();
     int p = g_pending.load();
     if (p != -2 && ApplySkin(p, g_force.load())) {
         g_pending = -2;
         unlink((g_plugDir + "/request.working").c_str());   // llegamos aqui = no hubo crash
+    }
+    // al empezar una mision se vuelve a CJ (las misiones usan los slots de personajes especiales)
+    if (g_scriptSpace && FindPlayerPed(-1)) {
+        int32_t om;
+        memcpy(&om, g_scriptSpace + kOnMissionVar * 4, sizeof om);
+        if (om != g_prevMission) {
+            if (g_missionLogs++ < 20) LOGI("ONMISSION %d -> %d", g_prevMission, om);
+            if (om != 0 && g_prevMission == 0 && g_curSkin >= 0 && g_pending.load() == -2) {
+                LOGI("mision iniciada: se vuelve a CJ");
+                g_pending = -1;
+            }
+            g_prevMission = om;
+        }
     }
 }
 
@@ -224,7 +252,7 @@ extern "C" void OnModLoad() {
         FILE* lf = fopen((g_plugDir + "/log.txt").c_str(), "w"); if (lf) fclose(lf);
         if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
     }
-    LOGI("== SkinSelector 1.0.5 cargado (OnModLoad) ==");
+    LOGI("== SkinSelector 1.1.0 cargado (OnModLoad) ==");
     LOGI("files: %s", files.c_str());
 
     void* h = aml->GetLibHandle("libGTASA.so");
@@ -238,6 +266,8 @@ extern "C" void OnModLoad() {
     SYM(DeleteRwObject,                 "_ZN7CEntity14DeleteRwObjectEv");   // opcional
     SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");  // opcional
     SYM(GetModelInfoByName,             "_ZN10CModelInfo12GetModelInfoEPKcPi");
+    g_scriptSpace = (uint8_t*)aml->GetSym(h, "_ZN11CTheScripts11ScriptSpaceE");
+    LOGI("  %s _ZN11CTheScripts11ScriptSpaceE", g_scriptSpace ? "ok     " : "FALTA  ");
     void* process = (void*)aml->GetSym(h, "_ZN5CGame7ProcessEv");
     LOGI("  %s _ZN5CGame7ProcessEv", process ? "ok     " : "FALTA  ");
     #undef SYM
