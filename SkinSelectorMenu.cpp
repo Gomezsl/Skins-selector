@@ -25,7 +25,7 @@
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 
-MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 1.7.0, Tu nombre)
+MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 1.8.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSAMenu"
@@ -249,7 +249,7 @@ static bool Row(const Item& it, float rh, float k) {
     return clicked;
 }
 
-static int g_screen = 0;          // 0 = skins, 1 = ajustes
+static int g_screen = 0;          // 0 = skins, 1 = ajustes (pestanas de arriba)
 
 static void BuildUI(float W, float H, float k) {
     g_frameRects.clear();
@@ -290,22 +290,19 @@ static void BuildUI(float W, float H, float k) {
         items.push_back({"Releer carpeta de skins", "", kWhite, 4, ""});
         items.push_back({"Skin en misiones: siempre activa", "", kGrey, 9, ""});
     }
-    const int perPage = 6;
-    int pages = ((int)items.size() + perPage - 1) / perPage;
-    if (pages < 1) pages = 1;
-    if (g_page >= pages) g_page = pages - 1;
-    if (g_page < 0) g_page = 0;
 
     // ---- panel principal (izquierda) ----
-    const float pw = W * 0.43f, ph = H * 0.69f;
-    ImGui::SetNextWindowPos(ImVec2(W * 0.02f, H * 0.085f));
+    const float pw = W * 0.43f, ph = H * 0.82f;
+    ImGui::SetNextWindowPos(ImVec2(W * 0.02f, H * 0.07f));
     ImGui::SetNextWindowSize(ImVec2(pw, ph));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.04f, 0.04f, 0.05f, 0.86f));
     ImGui::Begin("##vpanel", nullptr, fixed);
     const float pad = ImGui::GetStyle().WindowPadding.x;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
 
-    ImGui::TextColored(kGold, "%s", settings ? (title + "  -  AJUSTES").c_str() : title.c_str());
+    // titulo y X
+    ImGui::TextColored(kGold, "%s", title.c_str());
     {
         float xw = 54.0f * k;
         ImGui::SameLine(pw - xw - pad);
@@ -313,13 +310,39 @@ static void BuildUI(float W, float H, float k) {
         if (ImGui::Button("X", ImVec2(xw, 0))) g_open = false;
         ImGui::PopStyleColor();
     }
-    ImGui::Spacing();
 
+    // pestanas: SKINS | AJUSTES
+    {
+        const float tabW = (pw - 2.0f * pad - spacing) * 0.5f;
+        for (int t = 0; t < 2; t++) {
+            bool active = (g_screen == t);
+            ImGui::PushStyleColor(ImGuiCol_Button, active ? ImVec4(0.16f, 0.38f, 0.62f, 1.0f) : ImVec4(0.14f, 0.14f, 0.16f, 1.0f));
+            ImGui::PushStyleColor(ImGuiCol_Text, active ? kWhite : kGrey);
+            if (ImGui::Button(t == 0 ? "SKINS" : "AJUSTES", ImVec2(tabW, 46.0f * k)) && g_screen != t) { g_screen = t; g_page = 0; }
+            ImGui::PopStyleColor(2);
+            if (t == 0) ImGui::SameLine();
+        }
+    }
+
+    // cuantas filas caben entre las pestanas y el pie (con las flechas)
+    const float rh = 52.0f * k;
+    const float ah = 44.0f * k;                                  // alto de las flechas del pie
+    const float footerTop = ImGui::GetWindowHeight() - pad - ah;
+    const float pitch = rh + ImGui::GetStyle().ItemSpacing.y;
+    float avail = footerTop - ImGui::GetCursorPosY() - 10.0f * k;
+    int perPage = (int)(avail / pitch);
+    if (perPage < 3) perPage = 3;
+    if (perPage > 16) perPage = 16;
+    int pages = ((int)items.size() + perPage - 1) / perPage;
+    if (pages < 1) pages = 1;
+    if (g_page >= pages) g_page = pages - 1;
+    if (g_page < 0) g_page = 0;
+
+    // filas
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.11f, 0.11f, 0.12f, 0.92f));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.20f, 0.22f, 0.95f));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.30f, 0.30f, 0.33f, 1.0f));
-    const float rh = 56.0f * k;
     for (int i = g_page * perPage; i < (int)items.size() && i < (g_page + 1) * perPage; i++) {
         ImGui::PushID(i);
         if (Row(items[i], rh, k)) {
@@ -337,62 +360,37 @@ static void BuildUI(float W, float H, float k) {
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar();
 
-    // ---- pie: pista, ATRAS y AJUSTES ----
-    const float bh = 54.0f * k, bw = pw * 0.34f;
-    char hint[64];
-    if (pages > 1) snprintf(hint, sizeof hint, "Toca una opcion   (%d/%d)", g_page + 1, pages);
-    else snprintf(hint, sizeof hint, "Toca una opcion");
-    ImGui::SetCursorPos(ImVec2(pad, ImGui::GetWindowHeight() - bh - pad - 30.0f * k));
-    ImGui::SetWindowFontScale(0.7f);
-    if (!status.empty()) ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.2f, 1.0f), "Esperando: jugador %s...", status.c_str());
-    else ImGui::TextColored(kGrey, "%s", hint);
-    ImGui::SetWindowFontScale(1.0f);
-    ImGui::SetCursorPos(ImVec2(pad, ImGui::GetWindowHeight() - bh - pad));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.22f, 0.22f, 0.24f, 1.0f));
-    if (ImGui::Button("< ATRAS", ImVec2(bw, bh))) {
-        if (settings) { g_screen = 0; g_page = 0; }      // de ajustes vuelve a las skins
-        else g_open = false;                             // de las skins cierra el menu
-    }
-    if (!settings) {
-        ImGui::SetCursorPos(ImVec2(pw - pad - bw, ImGui::GetWindowHeight() - bh - pad));
-        if (ImGui::Button("AJUSTES", ImVec2(bw, bh))) { g_screen = 1; g_page = 0; }
-    }
-    ImGui::PopStyleColor();
-    AddRect();
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
+    // ---- pie: pista a la izquierda y flechas pequenas a la derecha ----
+    {
+        char hint[64];
+        if (!status.empty()) snprintf(hint, sizeof hint, "Esperando: jugador %s...", status.c_str());
+        else snprintf(hint, sizeof hint, "Toca una opcion");
+        ImGui::SetCursorPos(ImVec2(pad, footerTop + ah * 0.28f));
+        ImGui::SetWindowFontScale(0.7f);
+        ImGui::TextColored(status.empty() ? kGrey : ImVec4(1.0f, 0.65f, 0.2f, 1.0f), "%s", hint);
+        ImGui::SetWindowFontScale(1.0f);
 
-    // ---- botones de pagina "<" ">": ver mas skins (abajo a la izquierda, fuera del panel) ----
-    ImGui::SetNextWindowPos(ImVec2(W * 0.02f, H * 0.80f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::Begin("##vnav", nullptr, fixed | ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f * k);
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.85f, 0.85f, 0.85f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.88f));
-    ImGui::PushStyleColor(ImGuiCol_Text, pages > 1 ? kWhite : ImVec4(0.45f, 0.45f, 0.47f, 1.0f));
-    if (ImGui::Button("<", ImVec2(W * 0.095f, H * 0.13f)) && pages > 1) g_page = (g_page + pages - 1) % pages;
-    ImGui::SameLine();
-    if (ImGui::Button(">", ImVec2(W * 0.095f, H * 0.13f)) && pages > 1) g_page = (g_page + 1) % pages;
-    ImGui::PopStyleColor(3);
-    ImGui::PopStyleVar();
-    AddRect();
-    ImGui::End();
-    ImGui::PopStyleColor();
-    ImGui::PopStyleVar();
+        const float aw = 62.0f * k, lw = 96.0f * k;
+        const float x0 = pw - pad - aw * 2.0f - lw - spacing * 2.0f;
+        const bool multi = pages > 1;
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.18f, 0.20f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, multi ? kWhite : ImVec4(0.45f, 0.45f, 0.47f, 1.0f));
+        ImGui::SetCursorPos(ImVec2(x0, footerTop));
+        if (ImGui::Button("<", ImVec2(aw, ah)) && multi) g_page = (g_page + pages - 1) % pages;
+        ImGui::PopStyleColor(2);
 
-    // ---- SALIR (arriba a la derecha) ----
-    ImGui::SetNextWindowPos(ImVec2(W * 0.985f, H * 0.03f), ImGuiCond_Always, ImVec2(1.0f, 0.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::Begin("##vexit", nullptr, fixed | ImGuiWindowFlags_AlwaysAutoResize);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 2.0f * k);
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.80f, 0.22f, 0.20f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.40f, 0.07f, 0.07f, 0.95f));
-    if (ImGui::Button("SALIR", ImVec2(W * 0.13f, H * 0.085f))) g_open = false;
-    ImGui::PopStyleColor(2);
-    ImGui::PopStyleVar();
+        char pg[24];
+        snprintf(pg, sizeof pg, "%d/%d", g_page + 1, pages);
+        ImVec2 ts = ImGui::CalcTextSize(pg);
+        ImGui::SetCursorPos(ImVec2(x0 + aw + spacing + (lw - ts.x) * 0.5f, footerTop + (ah - ts.y) * 0.5f));
+        ImGui::TextColored(kGrey, "%s", pg);
+
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.18f, 0.20f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_Text, multi ? kWhite : ImVec4(0.45f, 0.45f, 0.47f, 1.0f));
+        ImGui::SetCursorPos(ImVec2(x0 + aw + lw + spacing * 2.0f, footerTop));
+        if (ImGui::Button(">", ImVec2(aw, ah)) && multi) g_page = (g_page + 1) % pages;
+        ImGui::PopStyleColor(2);
+    }
     AddRect();
     ImGui::End();
     ImGui::PopStyleColor();
@@ -577,7 +575,7 @@ extern "C" void OnModLoad() {
     g_plugDir = files + "/VestidorSA";
     mkdir(g_plugDir.c_str(), 0777);
     FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
-    Log("== Vestidor SA Menu 1.7.0 cargado ==");
+    Log("== Vestidor SA Menu 1.8.0 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
