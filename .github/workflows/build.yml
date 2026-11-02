@@ -7,8 +7,12 @@ jobs:
       - uses: actions/checkout@v4
       - run: git clone --depth 1 https://github.com/RusJJ/AndroidModLoader.git AndroidModLoader
       - run: git clone --depth 1 --branch v1.89.7 https://github.com/ocornut/imgui.git imgui
+      - name: Fuente Roboto
+        run: |
+          (g++ -O1 imgui/misc/fonts/binary_to_compressed_c.cpp -o b2c && ./b2c -base85 imgui/misc/fonts/Roboto-Medium.ttf roboto_font > roboto_font.h) || rm -f roboto_font.h
+          ls -la roboto_font.h || true
       - run: $ANDROID_NDK_LATEST_HOME/ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk NDK_APPLICATION_MK=Application.mk
       - uses: actions/upload-artifact@v4
         with:
-          name: SkinSelector
+          name: VestidorSA
           path: libs/arm64-v8a/*.so
