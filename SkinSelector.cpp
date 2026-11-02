@@ -19,7 +19,7 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.8.1, Tu nombre)
+MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.9.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSA"
@@ -79,6 +79,8 @@ static int g_missionLogs = 0;
 static const int kOnMissionVar = 408;      // $ONMISSION en 2.10 (lo dice el log de ZyZ)
 
 static int g_desired = -1;                 // skin que el jugador quiere llevar (-1 = CJ); sobrevive a cinematicas, misiones y guardados
+static bool g_vehicleSwap = false;         // opcion: cambiar de skin tambien dentro del vehiculo (el cuerpo queda de pie); por defecto espera a que salga
+static void (*FlushImmediately)(void*, bool);   // CPedIntelligence::FlushImmediately
 static bool g_remember = false;            // opcion "recordar": mantener la ultima skin entre partidas e inicios del juego
 static std::string g_lastName = "CJ";      // ultima skin elegida (se guarda en settings.txt)
 static bool g_needReapply = false;
@@ -101,7 +103,7 @@ static void WriteCurrent(const char* name) {   // el menu lee esto para marcar l
 static void SaveSettings() {
     FILE* f = fopen((g_plugDir + "/settings.txt").c_str(), "w");
     if (!f) return;
-    fprintf(f, "remember=%d\nmissions=%d\ntitle=%s\nlast=%s\n", g_remember ? 1 : 0, g_missions ? 1 : 0, g_title.c_str(), g_lastName.c_str());
+    fprintf(f, "remember=%d\nmissions=%d\nvehicle=%d\ntitle=%s\nlast=%s\n", g_remember ? 1 : 0, g_missions ? 1 : 0, g_vehicleSwap ? 1 : 0, g_title.c_str(), g_lastName.c_str());
     fclose(f);
 }
 static void LoadSettings() {
@@ -112,7 +114,8 @@ static void LoadSettings() {
         std::string l = line;
         while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ')) l.pop_back();
         if (l.rfind("remember=", 0) == 0) g_remember = (l.substr(9) == "1");
-        // "missions=" se ignora: la skin en misiones esta siempre activa (MISSIONS_OFF en request.txt solo vale hasta cerrar el juego)
+        else if (l.rfind("missions=", 0) == 0) { g_missions = (l.substr(9) == "1"); g_slot = g_missions ? 9 : 1; }
+        else if (l.rfind("vehicle=", 0) == 0) g_vehicleSwap = (l.substr(8) == "1");
         else if (l.rfind("title=", 0) == 0 && l.size() > 6) g_title = l.substr(6);
         else if (l.rfind("last=", 0) == 0) g_lastName = l.substr(5);
     }
@@ -215,8 +218,10 @@ static void WriteStatus(const std::string& st) {
 }
 
 // CPedIntelligence = { CPed* m_pPed; CTaskManager { CTask* primarias[5]; CTask* secundarias[6]; CPed* m_pPed; } ... }
+static bool InVehicle() { return FindPlayerVehicle && FindPlayerVehicle(-1, false); }
+
+// solo tareas (agachado, peleando, saltando...); el vehiculo se trata aparte
 static bool PlayerBusy(void* ped, std::string* why) {
-    if (FindPlayerVehicle && FindPlayerVehicle(-1, false)) { *why = "en vehiculo"; return true; }   // en coche las tareas parecen las de a pie
     void* in = FindIntelligence(ped);
     if (!in || !Readable(in, 8 * 13)) return false;
     uint64_t q[13];
@@ -235,6 +240,32 @@ static bool PlayerBusy(void* ped, std::string* why) {
     return false;
 }
 
+// true = hay que esperar antes de cambiar el modelo. A pie el cambio es inmediato (se limpian las tareas);
+// en vehiculo se espera a que salga salvo que la opcion "cambiar dentro del vehiculo" este activa.
+static bool NeedWait(void* ped, std::string* why) {
+    if (InVehicle()) {
+        if (g_vehicleSwap) return false;
+        *why = "en vehiculo";
+        return true;
+    }
+    if (!FlushImmediately) return PlayerBusy(ped, why);   // sin forma de limpiar tareas: se espera
+    return false;
+}
+
+// antes de destruir las animaciones: si el jugador esta agachado, peleando, etc. se limpian sus tareas como hace CLEAR_CHAR_TASKS_IMMEDIATELY
+static void PrepareForModelChange(void* ped) {
+    std::string why;
+    if (!InVehicle() && FlushImmediately && PlayerBusy(ped, &why)) {
+        void* in = FindIntelligence(ped);
+        if (in) {
+            LOGI("  jugador %s: se limpian sus tareas antes del cambio de modelo", why.c_str());
+            FlushImmediately(in, true);
+            return;
+        }
+    }
+    ClearDuck(ped);
+}
+
 static int ReadPedModel(void* ped) {
     if (g_miOff < 0 || !ped) return -1;
     uint16_t v;
@@ -247,7 +278,7 @@ static bool ApplySkin(int idx, bool force = false) {
     void* ped = FindPlayerPed(-1);
     if (!ped) return false;                       // aun no hay jugador (menu / carga): se reintenta
     if (idx < 0) {                                // volver a CJ
-        ClearDuck(ped);
+        PrepareForModelChange(ped);
         if (DeleteRwObject) DeleteRwObject(ped);
         SetModelIndex(ped, 0);
         if (RebuildPlayer) RebuildPlayer(ped, false);
@@ -313,7 +344,7 @@ static bool ApplySkin(int idx, bool force = false) {
             }
         }
     }
-    ClearDuck(ped);
+    PrepareForModelChange(ped);
     if (DeleteRwObject && !g_noDelete.load()) { LOGI("  DeleteRwObject(ped=%p)", ped); DeleteRwObject(ped); }
     LOGI("  SetModelIndex(ped=%p, modelo=%u)", ped, modelId);
     SetModelIndex(ped, modelId);
@@ -392,6 +423,13 @@ static void PollRequestFile() {
         done();
         return;
     }
+    if (l == "vehicle_on" || l == "vehicle_off") {
+        g_vehicleSwap = (l == "vehicle_on");
+        SaveSettings();
+        LOGI("cambiar dentro del vehiculo: %s", g_vehicleSwap ? "SI" : "NO");
+        done();
+        return;
+    }
     if (l == "cj" || l == "default" || l == "0") { Choose(-1); return; }
     if (l == "rescan") { Rescan(); done(); return; }
     if (l.find_first_not_of("0123456789") == std::string::npos) {
@@ -461,7 +499,7 @@ static void Watchdog() {
     int p = g_pending.load();
     if (p != -2 && !cut && !loading) {
         std::string why;
-        if (PlayerBusy(ped, &why)) {
+        if (NeedWait(ped, &why)) {
             if (g_busySince == 0) { g_busySince = g_frame; LOGI("esperando: el jugador esta %s (cambiar el modelo ahora lo dejaria atascado)", why.c_str()); }
             WriteStatus(why);
             if (g_frame - g_busySince > 1200) {
@@ -494,7 +532,7 @@ static void Watchdog() {
             g_reapplyDelay--;
         } else if (g_frame >= g_nextTryFrame) {
             std::string why;
-            if (PlayerBusy(ped, &why)) {
+            if (NeedWait(ped, &why)) {
                 static int lastBusyLog = -1000;
                 if (g_frame - lastBusyLog > 600) { lastBusyLog = g_frame; LOGI("reaplicado en espera: el jugador esta %s", why.c_str()); }
                 WriteStatus(why);
@@ -564,7 +602,7 @@ extern "C" void OnModLoad() {
     LoadSettings();
     unlink((g_plugDir + "/status.txt").c_str());   // sin estado "esperando" de la sesion anterior
     WriteCurrent("CJ");   // proceso nuevo = CJ; si "recordar" esta activo, current.txt se actualiza al reaplicar
-    LOGI("== Vestidor SA 1.8.1 cargado (OnModLoad) ==");
+    LOGI("== Vestidor SA 1.9.0 cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
@@ -576,6 +614,7 @@ extern "C" void OnModLoad() {
     SYM(SetMissionDoesntRequireSpecialChar, "_ZN10CStreaming34SetMissionDoesntRequireSpecialCharEi");
     SYM(FindPlayerPed,                  "_Z13FindPlayerPedi");
     SYM(FindPlayerVehicle,              "_Z17FindPlayerVehicleib");   // opcional
+    SYM(FlushImmediately,               "_ZN16CPedIntelligence16FlushImmediatelyEb");   // opcional
     SYM(SetModelIndex,                  "_ZN4CPed13SetModelIndexEj");
     SYM(DeleteRwObject,                 "_ZN7CEntity14DeleteRwObjectEv");   // opcional
     SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");  // opcional

@@ -21,7 +21,7 @@ include $(BUILD_STATIC_LIBRARY)
 include $(CLEAR_VARS)
 LOCAL_MODULE := VestidorSAMenu64
 LOCAL_SRC_FILES := SkinSelectorMenu.cpp AndroidModLoader/mod/config.cpp
-LOCAL_C_INCLUDES := $(LOCAL_PATH)/AndroidModLoader $(LOCAL_PATH)/imgui $(LOCAL_PATH)/imgui/backends
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/AndroidModLoader $(LOCAL_PATH)/imgui $(LOCAL_PATH)/imgui/backends $(LOCAL_PATH)
 LOCAL_CPPFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti
 LOCAL_STATIC_LIBRARIES := imgui_es2
 LOCAL_LDLIBS := -llog -ldl -lEGL -lGLESv2
