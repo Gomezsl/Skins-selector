@@ -19,7 +19,7 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.8.0, Tu nombre)
+MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.8.1, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSA"
@@ -55,6 +55,7 @@ static void  (*LoadAllRequestedModels)(bool);
 static bool  (*HasSpecialCharLoaded)(int);
 static void  (*SetMissionDoesntRequireSpecialChar)(int);
 static void* (*FindPlayerPed)(int);
+static void* (*FindPlayerVehicle)(int, bool);   // devuelve el vehiculo si el jugador va dentro
 static void  (*SetModelIndex)(void*, unsigned int);   // CPed::SetModelIndex
 static void  (*DeleteRwObject)(void*);                // CEntity::DeleteRwObject (opcional)
 static void  (*RebuildPlayer)(void*, bool);           // CClothes::RebuildPlayer (opcional, para volver a CJ)
@@ -215,6 +216,7 @@ static void WriteStatus(const std::string& st) {
 
 // CPedIntelligence = { CPed* m_pPed; CTaskManager { CTask* primarias[5]; CTask* secundarias[6]; CPed* m_pPed; } ... }
 static bool PlayerBusy(void* ped, std::string* why) {
+    if (FindPlayerVehicle && FindPlayerVehicle(-1, false)) { *why = "en vehiculo"; return true; }   // en coche las tareas parecen las de a pie
     void* in = FindIntelligence(ped);
     if (!in || !Readable(in, 8 * 13)) return false;
     uint64_t q[13];
@@ -562,7 +564,7 @@ extern "C" void OnModLoad() {
     LoadSettings();
     unlink((g_plugDir + "/status.txt").c_str());   // sin estado "esperando" de la sesion anterior
     WriteCurrent("CJ");   // proceso nuevo = CJ; si "recordar" esta activo, current.txt se actualiza al reaplicar
-    LOGI("== Vestidor SA 1.8.0 cargado (OnModLoad) ==");
+    LOGI("== Vestidor SA 1.8.1 cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
@@ -573,6 +575,7 @@ extern "C" void OnModLoad() {
     SYM(HasSpecialCharLoaded,           "_ZN10CStreaming20HasSpecialCharLoadedEi");
     SYM(SetMissionDoesntRequireSpecialChar, "_ZN10CStreaming34SetMissionDoesntRequireSpecialCharEi");
     SYM(FindPlayerPed,                  "_Z13FindPlayerPedi");
+    SYM(FindPlayerVehicle,              "_Z17FindPlayerVehicleib");   // opcional
     SYM(SetModelIndex,                  "_ZN4CPed13SetModelIndexEj");
     SYM(DeleteRwObject,                 "_ZN7CEntity14DeleteRwObjectEv");   // opcional
     SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");  // opcional
