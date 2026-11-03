@@ -13,13 +13,14 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include "skinscan.h"
+#include "vestidor_common.h"
 
 #if __has_include("isautils.h")
   #include "isautils.h"      // opcional: menu de SAUtils (copialo de su repo si lo quieres)
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.local.vestidorsa, Vestidor SA, 1.9.0, Tu nombre)
+MYMODCFG(net.local.vestidorsa, Vestidor SA, 2.0.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSA"
@@ -33,19 +34,13 @@ static const char* kFilesDirs[] = {
     "/storage/self/primary/Android/data/com.rockstargames.gtasa/files",
 };
 static std::string g_root;       // .../files/modloader
-static std::string g_plugDir;    // .../files/VestidorSA  (skins_list.txt, request.txt, log.txt)
+static std::string g_plugDir;    // .../files/VestidorSA  (VestidorSA.ini, state.ini, skins.ini, request.ini, log.txt)
 
 static void Log(const char* fmt, ...) {
-    char buf[512];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
+    vsa::LogV("nucleo", TAG, fmt, ap);
     va_end(ap);
-    __android_log_print(ANDROID_LOG_INFO, TAG, "%s", buf);
-    if (!g_plugDir.empty()) {
-        FILE* f = fopen((g_plugDir + "/log.txt").c_str(), "a");
-        if (f) { fputs(buf, f); fputc('\n', f); fclose(f); }
-    }
 }
 #define LOGI(...) Log(__VA_ARGS__)
 
@@ -95,41 +90,48 @@ static const volatile uint8_t* g_loadPtr = nullptr;   // CGenericGameStorage::ms
 static bool g_prevCut = false, g_prevLoading = false, g_sessionPending = false;
 static int g_nullFrames = 0;
 
-static void WriteCurrent(const char* name) {   // el menu lee esto para marcar la skin activa
-    FILE* f = fopen((g_plugDir + "/current.txt").c_str(), "w");
-    if (f) { fputs(name, f); fclose(f); }
-}
+static std::string g_status;        // "esperando: ..." para el menu; vacio = libre
+static std::string g_stateCur = "CJ";
 
-static void SaveSettings() {
-    FILE* f = fopen((g_plugDir + "/settings.txt").c_str(), "w");
-    if (!f) return;
-    fprintf(f, "remember=%d\nmissions=%d\nvehicle=%d\ntitle=%s\nlast=%s\n", g_remember ? 1 : 0, g_missions ? 1 : 0, g_vehicleSwap ? 1 : 0, g_title.c_str(), g_lastName.c_str());
-    fclose(f);
+static void WriteState() {          // state.ini: lo lee el menu (skin puesta y estado de espera)
+    vsa::Ini ini;
+    ini["State"]["current"] = g_stateCur;
+    ini["State"]["status"] = g_status;
+    vsa::IniWrite(vsa::P("state.ini"), ini);
+}
+static void WriteCurrent(const char* name) { g_stateCur = name; WriteState(); }
+
+static void SaveSettings() {        // VestidorSA.ini, seccion [General] (el menu guarda la suya en [Menu])
+    vsa::Ini ini = vsa::IniRead(vsa::P("VestidorSA.ini"));
+    auto& g = ini["General"];
+    g["remember"] = g_remember ? "1" : "0";
+    g["missions"] = g_missions ? "1" : "0";
+    g["vehicle"] = g_vehicleSwap ? "1" : "0";
+    g["title"] = g_title;
+    g["last"] = g_lastName;
+    vsa::IniWrite(vsa::P("VestidorSA.ini"), ini);
 }
 static void LoadSettings() {
-    FILE* f = fopen((g_plugDir + "/settings.txt").c_str(), "r");
-    if (!f) return;
-    char line[300];
-    while (fgets(line, sizeof line, f)) {
-        std::string l = line;
-        while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ')) l.pop_back();
-        if (l.rfind("remember=", 0) == 0) g_remember = (l.substr(9) == "1");
-        else if (l.rfind("missions=", 0) == 0) { g_missions = (l.substr(9) == "1"); g_slot = g_missions ? 9 : 1; }
-        else if (l.rfind("vehicle=", 0) == 0) g_vehicleSwap = (l.substr(8) == "1");
-        else if (l.rfind("title=", 0) == 0 && l.size() > 6) g_title = l.substr(6);
-        else if (l.rfind("last=", 0) == 0) g_lastName = l.substr(5);
-    }
-    fclose(f);
+    vsa::Ini ini = vsa::IniRead(vsa::P("VestidorSA.ini"));
+    if (ini.find("General") == ini.end()) return;
+    g_remember = vsa::GetInt(ini, "General", "remember", 0) == 1;
+    g_missions = vsa::GetInt(ini, "General", "missions", 1) == 1;
+    g_slot = g_missions ? 9 : 1;
+    g_vehicleSwap = vsa::GetInt(ini, "General", "vehicle", 0) == 1;
+    std::string t = vsa::Get(ini, "General", "title");
+    if (!t.empty()) g_title = t;
+    std::string l = vsa::Get(ini, "General", "last");
+    if (!l.empty()) g_lastName = l;
 }
 
-static void WriteList() {
-    std::string p = g_plugDir + "/skins_list.txt";
-    FILE* f = fopen(p.c_str(), "w");
-    if (!f) return;
-    fprintf(f, "# Escribe en request.txt el nombre o el numero de una skin (CJ = volver a CJ, RESCAN = releer carpeta)\n");
-    for (size_t i = 0; i < g_skins.size(); i++)
-        fprintf(f, "%zu = %s   (%s)\n", i + 1, g_skins[i].name.c_str(), g_skins[i].path.c_str());
-    fclose(f);
+static void WriteList() {           // skins.ini: [Skins] 1=nombre ... y [Paths] 1=ruta
+    vsa::Ini ini;
+    ini["Skins"]["count"] = std::to_string(g_skins.size());
+    for (size_t i = 0; i < g_skins.size(); i++) {
+        ini["Skins"][std::to_string(i + 1)] = g_skins[i].name;
+        ini["Paths"][std::to_string(i + 1)] = g_skins[i].path;
+    }
+    vsa::IniWrite(vsa::P("skins.ini"), ini);
 }
 static void Rescan() {
     // los indices pueden cambiar al releer: se recuerdan por nombre
@@ -206,15 +208,13 @@ static void ClearDuck(void* ped) {
 }
 
 // ---- el cambio de modelo destruye las animaciones: agachado, peleando, en coche, saltando... deja al jugador atascado ----
-static std::string g_status;        // texto de status.txt (el menu lo muestra); vacio = libre
 static int g_busySince = 0;
 static int g_layoutLogs = 0;
 
 static void WriteStatus(const std::string& st) {
     if (st == g_status) return;
     g_status = st;
-    FILE* f = fopen((g_plugDir + "/status.txt").c_str(), "w");
-    if (f) { fputs(st.c_str(), f); fclose(f); }
+    WriteState();
 }
 
 // CPedIntelligence = { CPed* m_pPed; CTaskManager { CTask* primarias[5]; CTask* secundarias[6]; CPed* m_pPed; } ... }
@@ -387,15 +387,13 @@ static void Choose(int idx) {
 }
 
 static void PollRequestFile() {
-    std::string p = g_plugDir + "/request.txt";
-    std::string w = g_plugDir + "/request.working";
-    FILE* f = fopen(p.c_str(), "r");
-    if (!f) return;
-    char buf[128] = {0};
-    if (!fgets(buf, sizeof buf, f)) buf[0] = 0;
-    fclose(f);
-    rename(p.c_str(), w.c_str());   // se queda como request.working hasta que la skin se aplique sin crash
-    std::string s = buf;
+    std::string p = vsa::P("request.ini");
+    std::string w = vsa::P("request_working.ini");
+    struct stat rst;
+    if (stat(p.c_str(), &rst) != 0) return;
+    vsa::Ini rq = vsa::IniRead(p);
+    rename(p.c_str(), w.c_str());   // se queda como request_working.ini hasta que la skin se aplique sin crash
+    std::string s = vsa::Get(rq, "Request", "command");
     while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
     while (!s.empty() && s.front() == ' ') s.erase(s.begin());
     g_force = false;
@@ -505,14 +503,14 @@ static void Watchdog() {
             if (g_frame - g_busySince > 1200) {
                 LOGI("se cancela el cambio: el jugador siguio ocupado (%s)", why.c_str());
                 g_pending = -2; g_busySince = 0; WriteStatus("");
-                unlink((g_plugDir + "/request.working").c_str());
+                unlink(vsa::P("request_working.ini").c_str());
             }
         } else {
             g_busySince = 0;
             WriteStatus("");
             if (ApplySkin(p, g_force.load())) {
                 g_pending = -2;
-                unlink((g_plugDir + "/request.working").c_str());   // llegamos aqui = no hubo crash
+                unlink(vsa::P("request_working.ini").c_str());   // llegamos aqui = no hubo crash
             }
         }
     }
@@ -591,18 +589,20 @@ extern "C" void OnModLoad() {
     g_root = files + "/modloader";
     g_plugDir = files + "/VestidorSA";
     mkdir(g_plugDir.c_str(), 0777);
-    {   // log nuevo en cada inicio; si quedo un request.working, esa skin crasheo el juego
-        std::string w = g_plugDir + "/request.working", c = g_plugDir + "/crashed_request.txt";
+    vsa::g_dir = g_plugDir;
+    vsa::LogInit();                 // log.txt unico: se reinicia una vez por sesion
+    {   // si quedo request_working.ini, esa skin crasheo el juego
+        std::string w = vsa::P("request_working.ini"), c = vsa::P("crashed_request.txt");
         struct stat st;
-        bool crashed = stat(w.c_str(), &st) == 0;
-        if (crashed) { remove(c.c_str()); rename(w.c_str(), c.c_str()); }
-        FILE* lf = fopen((g_plugDir + "/log.txt").c_str(), "w"); if (lf) fclose(lf);
-        if (crashed) LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
+        if (stat(w.c_str(), &st) == 0) {
+            remove(c.c_str());
+            rename(w.c_str(), c.c_str());
+            LOGI("!! la ultima skin pedida crasheo el juego (ver crashed_request.txt)");
+        }
     }
     LoadSettings();
-    unlink((g_plugDir + "/status.txt").c_str());   // sin estado "esperando" de la sesion anterior
-    WriteCurrent("CJ");   // proceso nuevo = CJ; si "recordar" esta activo, current.txt se actualiza al reaplicar
-    LOGI("== Vestidor SA 1.9.0 cargado (OnModLoad) ==");
+    WriteCurrent("CJ");   // proceso nuevo = CJ (state.ini); con "recordar" se actualiza al reaplicar
+    LOGI("== Vestidor SA 2.0.0 cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 

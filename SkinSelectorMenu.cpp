@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cfloat>
 #include <chrono>
 #include <cstdarg>
@@ -24,12 +25,13 @@
 #include <vector>
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
+#include "vestidor_common.h"
 #if __has_include("roboto_font.h")
   #include "roboto_font.h"     // lo genera el workflow: Roboto-Medium (de ImGui) con binary_to_compressed_c
   #define HAVE_EMBEDDED_FONT 1
 #endif
 
-MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 3.0.0, Tu nombre)
+MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 4.0.0, Tu nombre)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "VestidorSAMenu"
@@ -44,16 +46,10 @@ static const char* kFilesDirs[] = {
 static std::string g_plugDir;   // .../files/VestidorSA
 
 static void Log(const char* fmt, ...) {
-    char buf[400];
     va_list ap;
     va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
+    vsa::LogV("menu", TAG, fmt, ap);
     va_end(ap);
-    __android_log_print(ANDROID_LOG_INFO, TAG, "%s", buf);
-    if (!g_plugDir.empty()) {
-        FILE* f = fopen((g_plugDir + "/menu_log.txt").c_str(), "a");
-        if (f) { fputs(buf, f); fputc('\n', f); fclose(f); }
-    }
 }
 
 // ---- parche de GOT (cambia la direccion de una funcion importada por libGTASA.so) --------------
@@ -112,7 +108,7 @@ static bool PatchGot(const char* libName, const char* sym, void* repl, void** or
     return scan(jmprel, jmpsz) || scan(rela, relasz);
 }
 
-// ---- lista de skins y estado (los escribe el nucleo en files/VestidorSA/) ------------------------------
+// ---- lista de skins y estado (los escribe el nucleo en files/VestidorSA/: skins.ini, state.ini, VestidorSA.ini) ----
 static std::vector<std::string> g_skinsM;
 static std::string g_current = "CJ";
 static std::string g_title = "VESTIDOR SA";
@@ -123,53 +119,25 @@ static std::string g_status;
 static time_t g_lastRead = 0;
 static std::mutex g_listMtx;
 
-static std::string ReadFirstLine(const std::string& path) {
-    FILE* f = fopen(path.c_str(), "r");
-    if (!f) return "";
-    char b[200] = {0};
-    if (!fgets(b, sizeof b, f)) b[0] = 0;
-    fclose(f);
-    std::string s = b;
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
-    return s;
-}
-
 static void RefreshList() {
     time_t now = time(nullptr);
     if (now - g_lastRead < 2) return;
     g_lastRead = now;
     std::vector<std::string> skins;
-    FILE* f = fopen((g_plugDir + "/skins_list.txt").c_str(), "r");
-    if (f) {
-        char line[1024];
-        while (fgets(line, sizeof line, f)) {
-            if (line[0] == '#') continue;
-            std::string l = line;
-            size_t eq = l.find(" = ");
-            size_t pa = l.find("   (/");
-            if (eq == std::string::npos || pa == std::string::npos || pa < eq + 3) continue;
-            skins.push_back(l.substr(eq + 3, pa - eq - 3));
-        }
-        fclose(f);
+    vsa::Ini sk = vsa::IniRead(vsa::P("skins.ini"));
+    int n = vsa::GetInt(sk, "Skins", "count", 0);
+    for (int i = 1; i <= n; i++) {
+        std::string nm = vsa::Get(sk, "Skins", std::to_string(i).c_str());
+        if (!nm.empty()) skins.push_back(nm);
     }
-    std::string cur = ReadFirstLine(g_plugDir + "/current.txt");
-    std::string status = ReadFirstLine(g_plugDir + "/status.txt");
-    bool rem = false, mis = true, veh = false;
-    std::string title;
-    FILE* sf = fopen((g_plugDir + "/settings.txt").c_str(), "r");
-    if (sf) {
-        char sl[200];
-        while (fgets(sl, sizeof sl, sf)) {
-            if (strncmp(sl, "remember=", 9) == 0) rem = (sl[9] == '1');
-            else if (strncmp(sl, "missions=", 9) == 0) mis = (sl[9] == '1');
-            else if (strncmp(sl, "vehicle=", 8) == 0) veh = (sl[8] == '1');
-            else if (strncmp(sl, "title=", 6) == 0) {
-                title = sl + 6;
-                while (!title.empty() && (title.back() == '\n' || title.back() == '\r')) title.pop_back();
-            }
-        }
-        fclose(sf);
-    }
+    vsa::Ini st = vsa::IniRead(vsa::P("state.ini"));
+    vsa::Ini cf = vsa::IniRead(vsa::P("VestidorSA.ini"));
+    std::string cur = vsa::Get(st, "State", "current");
+    std::string status = vsa::Get(st, "State", "status");
+    bool rem = vsa::GetInt(cf, "General", "remember", 0) == 1;
+    bool mis = vsa::GetInt(cf, "General", "missions", 1) == 1;
+    bool veh = vsa::GetInt(cf, "General", "vehicle", 0) == 1;
+    std::string title = vsa::Get(cf, "General", "title");
     std::lock_guard<std::mutex> lk(g_listMtx);
     g_skinsM = skins;
     g_remember = rem;
@@ -180,11 +148,10 @@ static void RefreshList() {
     if (!cur.empty()) g_current = cur;
 }
 
-static void Request(const std::string& name) {
-    FILE* f = fopen((g_plugDir + "/request.txt").c_str(), "w");
-    if (!f) { Log("no puedo escribir request.txt"); return; }
-    fputs(name.c_str(), f);
-    fclose(f);
+static void Request(const std::string& name) {      // request.ini: [Request] command=...
+    vsa::Ini ini;
+    ini["Request"]["command"] = name;
+    if (!vsa::IniWrite(vsa::P("request.ini"), ini)) { Log("no puedo escribir request.ini"); return; }
     Log("pedido: %s", name.c_str());
 }
 
@@ -226,38 +193,47 @@ static uintptr_t AND_TouchEvent_hook(int type, int idx, int x, int y) {
     return AND_TouchEvent_orig ? AND_TouchEvent_orig(type, idx, x, y) : 0;
 }
 
-// ---- ajustes propios del menu (menu_settings.txt) -------------------------------------------------
+// ---- ajustes propios del menu: VestidorSA.ini, seccion [Menu] ----------------------------------------
 static int g_theme = 0;                       // 0 por defecto, 1 rojo, 2 azul, 3 verde, 4 naranja
 static int g_lang = 0;                        // 0 espanol, 1 ingles, 2 indonesio
-static int g_size = 1;                        // 0 pequeno, 1 normal, 2 grande
+static float g_sizeMul = 1.0f;                // tamano del menu
+static float g_btnMul = 1.0f;                 // tamano del boton
+static float g_alpha = 1.0f;                  // opacidad del menu y del boton
 static float g_btnFx = 0.012f, g_btnFy = 0.30f;   // posicion del boton: fraccion de la pantalla
 static bool g_btnLock = false;                // boton bloqueado: no se puede arrastrar
 static bool g_btnDragged = false;
 static bool g_styleDirty = false;
-static const float kSizeMul[3] = {0.85f, 1.0f, 1.2f};
-static const float kFontPx = 33.0f;           // letra a 1080p con tamano "normal"
+static const float kSizeLo = 0.70f, kSizeHi = 1.40f, kBtnLo = 0.60f, kBtnHi = 1.60f, kAlphaLo = 0.25f, kAlphaHi = 1.0f;
+static const float kFontPx = 33.0f;           // letra a 1080p con tamano 100%
+
+static float Clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 static void SaveMenuSettings() {
-    FILE* f = fopen((g_plugDir + "/menu_settings.txt").c_str(), "w");
-    if (!f) return;
-    fprintf(f, "theme=%d\nlang=%d\nsize=%d\nbtnx=%.4f\nbtny=%.4f\nlock=%d\n", g_theme, g_lang, g_size, g_btnFx, g_btnFy, g_btnLock ? 1 : 0);
-    fclose(f);
+    vsa::Ini ini = vsa::IniRead(vsa::P("VestidorSA.ini"));
+    auto& m = ini["Menu"];
+    char b[32];
+    m["theme"] = std::to_string(g_theme);
+    m["lang"] = std::to_string(g_lang);
+    snprintf(b, sizeof b, "%.2f", g_sizeMul);  m["menu_size"] = b;
+    snprintf(b, sizeof b, "%.2f", g_btnMul);   m["button_size"] = b;
+    snprintf(b, sizeof b, "%.2f", g_alpha);    m["opacity"] = b;
+    snprintf(b, sizeof b, "%.4f", g_btnFx);    m["button_x"] = b;
+    snprintf(b, sizeof b, "%.4f", g_btnFy);    m["button_y"] = b;
+    m["button_lock"] = g_btnLock ? "1" : "0";
+    vsa::IniWrite(vsa::P("VestidorSA.ini"), ini);
 }
 static void LoadMenuSettings() {
-    FILE* f = fopen((g_plugDir + "/menu_settings.txt").c_str(), "r");
-    if (!f) return;
-    char l[120];
-    while (fgets(l, sizeof l, f)) {
-        int v;
-        float x;
-        if (sscanf(l, "theme=%d", &v) == 1 && v >= 0 && v < 5) g_theme = v;
-        else if (sscanf(l, "lang=%d", &v) == 1 && v >= 0 && v < 3) g_lang = v;
-        else if (sscanf(l, "size=%d", &v) == 1 && v >= 0 && v < 3) g_size = v;
-        else if (sscanf(l, "lock=%d", &v) == 1) g_btnLock = (v == 1);
-        else if (sscanf(l, "btnx=%f", &x) == 1 && x >= 0.0f && x <= 1.0f) g_btnFx = x;
-        else if (sscanf(l, "btny=%f", &x) == 1 && x >= 0.0f && x <= 1.0f) g_btnFy = x;
-    }
-    fclose(f);
+    vsa::Ini ini = vsa::IniRead(vsa::P("VestidorSA.ini"));
+    if (ini.find("Menu") == ini.end()) return;
+    int v;
+    v = vsa::GetInt(ini, "Menu", "theme", 0);  if (v >= 0 && v < 5) g_theme = v;
+    v = vsa::GetInt(ini, "Menu", "lang", 0);   if (v >= 0 && v < 3) g_lang = v;
+    g_sizeMul = Clampf(vsa::GetFloat(ini, "Menu", "menu_size", 1.0f), kSizeLo, kSizeHi);
+    g_btnMul = Clampf(vsa::GetFloat(ini, "Menu", "button_size", 1.0f), kBtnLo, kBtnHi);
+    g_alpha = Clampf(vsa::GetFloat(ini, "Menu", "opacity", 1.0f), kAlphaLo, kAlphaHi);
+    g_btnFx = Clampf(vsa::GetFloat(ini, "Menu", "button_x", 0.012f), 0.0f, 1.0f);
+    g_btnFy = Clampf(vsa::GetFloat(ini, "Menu", "button_y", 0.30f), 0.0f, 1.0f);
+    g_btnLock = vsa::GetInt(ini, "Menu", "button_lock", 0) == 1;
 }
 
 // ---- fuente: Roboto embebida (la genera el workflow) o una del sistema; si no, la de pixeles de ImGui --------
@@ -291,19 +267,18 @@ static ImFont* LoadFont(float px) {
 
 // ---- idiomas: espanol, ingles, indonesio ---------------------------------------------------------------
 enum { K_CJ, K_WORN, K_REMEMBER, K_MISSIONS, K_VEHICLE, K_LOCK, K_HINT, K_WAIT, K_TAB_SKINS, K_TAB_SET,
-       K_LANG, K_THEME, K_SIZE, K_RESCAN, K_NOSKINS, K_COUNT };
+       K_LANG, K_THEME, K_MENUSIZE, K_BTNSIZE, K_OPACITY, K_RESCAN, K_NOSKINS, K_COUNT };
 static const char* kText[3][K_COUNT] = {
     {"Volver a ser CJ", "PUESTA", "Recordar última skin", "Skin en misiones", "Cambiar dentro del vehículo", "Bloquear botón",
-     "Toca una opción", "Esperando: jugador %s...", "SKINS", "AJUSTES", "Idioma", "Color", "Tamaño",
-     "Releer carpeta de skins", "Sin skins (revisa skins_list.txt)"},
+     "Toca una opción", "Esperando: jugador %s...", "SKINS", "AJUSTES", "Idioma", "Color", "Tamaño del menú",
+     "Tamaño del botón", "Opacidad", "Releer carpeta de skins", "Sin skins (revisa skins.ini)"},
     {"Back to CJ", "WORN", "Remember last skin", "Skin in missions", "Change inside vehicle", "Lock button",
-     "Tap an option", "Waiting: player %s...", "SKINS", "SETTINGS", "Language", "Color", "Size",
-     "Reload skins folder", "No skins (check skins_list.txt)"},
+     "Tap an option", "Waiting: player %s...", "SKINS", "SETTINGS", "Language", "Color", "Menu size",
+     "Button size", "Opacity", "Reload skins folder", "No skins (check skins.ini)"},
     {"Kembali jadi CJ", "DIPAKAI", "Ingat skin terakhir", "Skin di misi", "Ganti di dalam kendaraan", "Kunci tombol",
-     "Ketuk satu opsi", "Menunggu: pemain %s...", "SKIN", "PENGATURAN", "Bahasa", "Warna", "Ukuran",
-     "Muat ulang folder skin", "Tidak ada skin (cek skins_list.txt)"}};
+     "Ketuk satu opsi", "Menunggu: pemain %s...", "SKIN", "PENGATURAN", "Bahasa", "Warna", "Ukuran menu",
+     "Ukuran tombol", "Opasitas", "Muat ulang folder skin", "Tidak ada skin (cek skins.ini)"}};
 static const char* kLangName[3] = {"Español", "English", "Indonesia"};
-static const char* kSizeName[3][3] = {{"Pequeño", "Normal", "Grande"}, {"Small", "Normal", "Large"}, {"Kecil", "Normal", "Besar"}};
 static const char* kThemeName[3][5] = {{"Por defecto", "Rojo", "Azul", "Verde", "Naranja"},
                                        {"Default", "Red", "Blue", "Green", "Orange"},
                                        {"Bawaan", "Merah", "Biru", "Hijau", "Oranye"}};
@@ -350,6 +325,11 @@ static Pal MakePal() {
     p.rowHover = Mix(p.row, a, 0.35f);
     p.rowActive = Mix(p.row, a, 0.70f);
     p.seg = Mix(ImVec4(0.09f, 0.09f, 0.11f, 1.0f), a, t * 0.8f);
+    p.bg.w *= g_alpha;                      // la opacidad afecta a los fondos; el texto siempre se lee
+    p.row.w *= g_alpha;
+    p.rowHover.w *= g_alpha;
+    p.rowActive.w *= g_alpha;
+    p.seg.w *= g_alpha;
     return p;
 }
 
@@ -377,6 +357,23 @@ static void AddRect() {
     ImVec2 p = ImGui::GetWindowPos(), s = ImGui::GetWindowSize();
     float mg = 12.0f;
     g_frameRects.push_back({p.x - mg, p.y - mg, p.x + s.x + mg, p.y + s.y + mg});
+}
+
+// iconos dibujados con lineas: 0 = percha, 1 = engranaje
+static void DrawIcon(ImDrawList* dl, int kind, float cx, float cy, float s, ImU32 col, float th) {
+    if (kind == 0) {
+        dl->AddCircle(ImVec2(cx, cy - s * 0.62f), s * 0.17f, col, 16, th);
+        dl->AddLine(ImVec2(cx, cy - s * 0.45f), ImVec2(cx, cy - s * 0.2f), col, th);
+        dl->AddTriangle(ImVec2(cx, cy - s * 0.2f), ImVec2(cx - s * 0.8f, cy + s * 0.55f), ImVec2(cx + s * 0.8f, cy + s * 0.55f), col, th);
+    } else {
+        const float r = s * 0.5f;
+        dl->AddCircle(ImVec2(cx, cy), r, col, 24, th);
+        dl->AddCircleFilled(ImVec2(cx, cy), r * 0.32f, col, 16);
+        for (int i = 0; i < 8; i++) {
+            const float a = (float)i * 0.785398f, dx = cosf(a), dy = sinf(a);
+            dl->AddLine(ImVec2(cx + dx * r * 0.95f, cy + dy * r * 0.95f), ImVec2(cx + dx * r * 1.45f, cy + dy * r * 1.45f), col, th * 1.8f);
+        }
+    }
 }
 
 // fila: texto a la izquierda; a la derecha un interruptor, una pastilla o un valor con ">"
@@ -433,7 +430,42 @@ static void ColorRow(const Item& it, float rh, float u, const Pal& pal) {
     ImGui::SetCursorScreenPos(after);
 }
 
-// pestanas unidas: un solo control con dos mitades; la activa va en el color del tema
+// fila con barra deslizante. devuelve bit 1 = se esta arrastrando, bit 2 = se acaba de soltar
+static int SliderRow(const char* id, const std::string& label, float* v, float lo, float hi, float rh, float u, const Pal& pal) {
+    ImGuiIO& io = ImGui::GetIO();
+    const float h = rh * 1.55f;
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    const float w = ImGui::GetContentRegionAvail().x;
+    ImGui::Dummy(ImVec2(w, h));
+    ImVec2 after = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), ImGui::GetColorU32(pal.row), 14.0f * u);
+
+    const float x0 = p.x + 28.0f * u, x1 = p.x + w - 28.0f * u, ty = p.y + h - 30.0f * u;
+    ImGui::SetCursorScreenPos(ImVec2(x0 - 20.0f * u, ty - 26.0f * u));
+    ImGui::InvisibleButton(id, ImVec2(x1 - x0 + 40.0f * u, 52.0f * u));
+    int res = 0;
+    if (ImGui::IsItemActive()) {
+        *v = lo + Clampf((io.MousePos.x - x0) / (x1 - x0), 0.0f, 1.0f) * (hi - lo);
+        res |= 1;
+    }
+    if (ImGui::IsItemDeactivated()) res |= 2;
+
+    const float kx = x0 + (*v - lo) / (hi - lo) * (x1 - x0);
+    dl->AddText(ImVec2(p.x + 18.0f * u, p.y + 10.0f * u), IM_COL32(255, 255, 255, 255), label.c_str());
+    char val[16];
+    snprintf(val, sizeof val, "%d%%", (int)(*v * 100.0f + 0.5f));
+    ImVec2 ts = ImGui::CalcTextSize(val);
+    dl->AddText(ImVec2(p.x + w - 18.0f * u - ts.x, p.y + 10.0f * u), ImGui::GetColorU32(kGrey), val);
+    dl->AddRectFilled(ImVec2(x0, ty - 4.0f * u), ImVec2(x1, ty + 4.0f * u), IM_COL32(255, 255, 255, 45), 4.0f * u);
+    dl->AddRectFilled(ImVec2(x0, ty - 4.0f * u), ImVec2(kx, ty + 4.0f * u), ImGui::GetColorU32(pal.accent), 4.0f * u);
+    dl->AddCircleFilled(ImVec2(kx, ty), 15.0f * u, IM_COL32(255, 255, 255, 255), 24);
+    dl->AddCircle(ImVec2(kx, ty), 15.0f * u, ImGui::GetColorU32(pal.accent), 24, 3.0f * u);
+    ImGui::SetCursorScreenPos(after);
+    return res;
+}
+
+// pestanas unidas con icono: un solo control con dos mitades; la activa va en el color del tema
 static int Segmented(const std::string& a, const std::string& b, int active, float w, float h, float u, const Pal& pal) {
     ImVec2 p = ImGui::GetCursorScreenPos();
     ImGui::Dummy(ImVec2(w, h));
@@ -451,18 +483,40 @@ static int Segmented(const std::string& a, const std::string& b, int active, flo
         ImGui::PopID();
         if (i == active)
             dl->AddRectFilled(ImVec2(s.x + inset, s.y + inset), ImVec2(s.x + half - inset, s.y + h - inset), ImGui::GetColorU32(pal.accent), (h - 2.0f * inset) * 0.5f);
+        const ImU32 col = (i == active) ? IM_COL32(255, 255, 255, 255) : ImGui::GetColorU32(kGrey);
         ImVec2 ts = ImGui::CalcTextSize(lab[i]->c_str());
-        dl->AddText(ImVec2(s.x + (half - ts.x) * 0.5f, s.y + (h - ts.y) * 0.5f), i == active ? IM_COL32(255, 255, 255, 255) : ImGui::GetColorU32(kGrey), lab[i]->c_str());
+        const float isz = h * 0.40f, iw = isz * 1.7f, gap = 12.0f * u;
+        const float x = s.x + (half - (iw + gap + ts.x)) * 0.5f;
+        DrawIcon(dl, i, x + iw * 0.5f, s.y + h * 0.5f, isz, col, 2.4f * u);
+        dl->AddText(ImVec2(x + iw + gap, s.y + (h - ts.y) * 0.5f), col, lab[i]->c_str());
     }
     ImGui::SetCursorScreenPos(after);
     return clicked;
 }
 
+// boton de pagina: pastilla con un chevron dibujado (dir < 0 izquierda, dir > 0 derecha)
+static bool ArrowBtn(const char* id, int dir, float w, float h, bool enabled, float u, const Pal& pal) {
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    bool clicked = ImGui::InvisibleButton(id, ImVec2(w, h));
+    const bool act = ImGui::IsItemActive() && enabled;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p, ImVec2(p.x + w, p.y + h), ImGui::GetColorU32(act ? pal.rowActive : pal.seg), h * 0.5f);
+    const float cx = p.x + w * 0.5f, cy = p.y + h * 0.5f, s = h * 0.2f;
+    const float d = (dir < 0 ? 1.0f : -1.0f) * s * 0.5f;
+    const ImU32 col = enabled ? IM_COL32(255, 255, 255, 255) : IM_COL32(120, 122, 132, 255);
+    dl->AddLine(ImVec2(cx + d, cy - s), ImVec2(cx - d, cy), col, 3.2f * u);
+    dl->AddLine(ImVec2(cx - d, cy), ImVec2(cx + d, cy + s), col, 3.2f * u);
+    return clicked && enabled;
+}
+
 // boton flotante que abre el menu: percha + nombre; se arrastra para moverlo (salvo que este bloqueado)
 static void FloatingButton(float W, float H, float u, const std::string& title, const ImGuiWindowFlags fixed, const Pal& pal) {
     ImGuiIO& io = ImGui::GetIO();
-    ImVec2 ts = ImGui::CalcTextSize(title.c_str());
-    const float bw = ts.x + 124.0f * u, bh = 88.0f * u;
+    const float ub = u * g_btnMul;                                   // el boton tiene su propio tamano
+    ImFont* fn = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize() * g_btnMul;
+    ImVec2 ts = fn->CalcTextSizeA(fs, 100000.0f, 0.0f, title.c_str());
+    const float bw = ts.x + 124.0f * ub, bh = 88.0f * ub;
     if (g_btnFx < 0.0f) g_btnFx = 0.0f;
     if (g_btnFy < 0.0f) g_btnFy = 0.0f;
     if (g_btnFx > 1.0f - bw / W) g_btnFx = 1.0f - bw / W;
@@ -490,16 +544,14 @@ static void FloatingButton(float W, float H, float u, const std::string& title, 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     ImVec2 p0 = ImGui::GetWindowPos();
     ImVec2 p1(p0.x + bw, p0.y + bh);
-    const float r = 20.0f * u, th3 = 3.0f * u;
+    const float r = 20.0f * ub, th3 = 3.0f * ub;
     const ImU32 acc = ImGui::GetColorU32(pal.accent);
-    dl->AddRectFilled(ImVec2(p0.x + 4.0f * u, p0.y + 6.0f * u), ImVec2(p1.x + 4.0f * u, p1.y + 6.0f * u), IM_COL32(0, 0, 0, 110), r);
+    ImVec4 shadow = ImVec4(0.0f, 0.0f, 0.0f, 0.43f * g_alpha);
+    dl->AddRectFilled(ImVec2(p0.x + 4.0f * ub, p0.y + 6.0f * ub), ImVec2(p1.x + 4.0f * ub, p1.y + 6.0f * ub), ImGui::GetColorU32(shadow), r);
     dl->AddRectFilled(p0, p1, ImGui::GetColorU32(active ? pal.rowActive : pal.bg), r);
     dl->AddRect(p0, p1, acc, r, 0, th3);
-    const float cx = p0.x + 46.0f * u, cy = p0.y + bh * 0.5f;           // icono: percha
-    dl->AddCircle(ImVec2(cx, cy - 23.0f * u), 7.0f * u, acc, 20, th3);
-    dl->AddLine(ImVec2(cx, cy - 16.0f * u), ImVec2(cx, cy - 7.0f * u), acc, th3);
-    dl->AddTriangle(ImVec2(cx, cy - 7.0f * u), ImVec2(cx - 29.0f * u, cy + 19.0f * u), ImVec2(cx + 29.0f * u, cy + 19.0f * u), acc, th3);
-    dl->AddText(ImVec2(p0.x + 92.0f * u, cy - ts.y * 0.5f), IM_COL32(255, 255, 255, 255), title.c_str());
+    DrawIcon(dl, 0, p0.x + 46.0f * ub, p0.y + bh * 0.5f + 2.0f * ub, 40.0f * ub, acc, th3);
+    dl->AddText(fn, fs, ImVec2(p0.x + 92.0f * ub, p0.y + (bh - ts.y) * 0.5f), IM_COL32(255, 255, 255, 255), title.c_str());
     AddRect();
     ImGui::End();
     ImGui::PopStyleColor();
@@ -523,7 +575,7 @@ static void BuildUI(float W, float H, float u) {
 
     const bool settings = (g_screen == 1);
 
-    // ---- elementos de la lista ----
+    // ---- elementos de la lista (acciones 12-14 = barras deslizantes, 7 = fila de colores) ----
     std::vector<Item> items;
     if (!settings) {
         items.push_back({Tr(K_CJ), "", kRed, 2, ""});
@@ -541,8 +593,10 @@ static void BuildUI(float W, float H, float u) {
         Item c = {Tr(K_VEHICLE), "", kWhite, 10, ""};  c.sw = veh ? 1 : 0;       items.push_back(c);
         Item d = {Tr(K_LOCK), "", kWhite, 11, ""};     d.sw = g_btnLock ? 1 : 0; items.push_back(d);
         items.push_back({Tr(K_LANG), Loc(kLangName[g_lang]), kWhite, 5, ""});
-        items.push_back({Tr(K_SIZE), Loc(kSizeName[g_lang][g_size]), kWhite, 6, ""});
         items.push_back({Tr(K_THEME) + ": " + Loc(kThemeName[g_lang][g_theme]), "", kWhite, 7, ""});
+        items.push_back({Tr(K_MENUSIZE), "", kWhite, 12, ""});
+        items.push_back({Tr(K_BTNSIZE), "", kWhite, 13, ""});
+        items.push_back({Tr(K_OPACITY), "", kWhite, 14, ""});
         items.push_back({Tr(K_RESCAN), "", kWhite, 4, ""});
     }
 
@@ -568,25 +622,32 @@ static void BuildUI(float W, float H, float u) {
     }
     ImGui::Spacing();
 
-    // pestanas unidas SKINS | AJUSTES
+    // pestanas unidas SKINS | AJUSTES (con icono)
     {
-        int c = Segmented(Tr(K_TAB_SKINS), Tr(K_TAB_SET), g_screen, pw - 2.0f * pad, 56.0f * u, u, pal);
+        int c = Segmented(Tr(K_TAB_SKINS), Tr(K_TAB_SET), g_screen, pw - 2.0f * pad, 58.0f * u, u, pal);
         if (c >= 0 && c != g_screen) { g_screen = c; g_page = 0; }
     }
 
-    // cuantas filas caben entre las pestanas y el pie
+    // paginas segun la altura disponible (las barras son mas altas que las filas)
     const float rh = 56.0f * u;
     const float ah = 48.0f * u;
     const float footerTop = ImGui::GetWindowHeight() - pad - ah;
-    const float pitch = rh + ImGui::GetStyle().ItemSpacing.y;
-    float avail = footerTop - ImGui::GetCursorPosY() - 10.0f * u;
-    int perPage = (int)(avail / pitch);
-    if (perPage < 3) perPage = 3;
-    if (perPage > 16) perPage = 16;
-    int pages = ((int)items.size() + perPage - 1) / perPage;
-    if (pages < 1) pages = 1;
+    const float spY = ImGui::GetStyle().ItemSpacing.y;
+    const float avail = footerTop - ImGui::GetCursorPosY() - 10.0f * u;
+    auto itemH = [&](const Item& it) { return (it.action >= 12 && it.action <= 14 ? rh * 1.55f : rh) + spY; };
+    std::vector<int> starts(1, 0);
+    {
+        float acc = 0.0f;
+        for (int i = 0; i < (int)items.size(); i++) {
+            const float hh = itemH(items[i]);
+            if (acc + hh > avail && i > starts.back()) { starts.push_back(i); acc = 0.0f; }
+            acc += hh;
+        }
+    }
+    const int pages = (int)starts.size();
     if (g_page >= pages) g_page = pages - 1;
     if (g_page < 0) g_page = 0;
+    const int from = starts[g_page], to = (g_page + 1 < pages) ? starts[g_page + 1] : (int)items.size();
 
     // filas
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
@@ -594,10 +655,26 @@ static void BuildUI(float W, float H, float u) {
     ImGui::PushStyleColor(ImGuiCol_Button, pal.row);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, pal.rowHover);
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, pal.rowActive);
-    for (int i = g_page * perPage; i < (int)items.size() && i < (g_page + 1) * perPage; i++) {
+    for (int i = from; i < to; i++) {
         ImGui::PushID(i);
         const Item& it = items[i];
         if (it.action == 7) ColorRow(it, rh, u, pal);
+        else if (it.action == 12) {           // tamano del menu: se aplica al soltar (cambiarlo en vivo movia la barra bajo el dedo)
+            static float draft = 1.0f;
+            static bool dragging = false;
+            if (!dragging) draft = g_sizeMul;
+            int r = SliderRow("##sz", it.label, &draft, kSizeLo, kSizeHi, rh, u, pal);
+            if (r & 1) dragging = true;
+            if (r & 2) { dragging = false; g_sizeMul = draft; g_styleDirty = true; SaveMenuSettings(); }
+        }
+        else if (it.action == 13) {
+            int r = SliderRow("##bt", it.label, &g_btnMul, kBtnLo, kBtnHi, rh, u, pal);
+            if (r & 2) SaveMenuSettings();
+        }
+        else if (it.action == 14) {
+            int r = SliderRow("##op", it.label, &g_alpha, kAlphaLo, kAlphaHi, rh, u, pal);
+            if (r & 2) SaveMenuSettings();
+        }
         else if (Row(it, rh, u, pal)) {
             if (it.action == 1) Request(it.arg);
             else if (it.action == 2) Request("CJ");
@@ -607,7 +684,6 @@ static void BuildUI(float W, float H, float u) {
             }
             else if (it.action == 4) Request("RESCAN");
             else if (it.action == 5) { g_lang = (g_lang + 1) % 3; SaveMenuSettings(); }
-            else if (it.action == 6) { g_size = (g_size + 1) % 3; g_styleDirty = true; SaveMenuSettings(); }
             else if (it.action == 8) {
                 { std::lock_guard<std::mutex> lk(g_listMtx); g_missions = !mis; g_lastRead = time(nullptr); }
                 Request(mis ? "MISSIONS_OFF" : "MISSIONS_ON");
@@ -623,7 +699,7 @@ static void BuildUI(float W, float H, float u) {
     ImGui::PopStyleColor(3);
     ImGui::PopStyleVar(2);
 
-    // ---- pie: pista a la izquierda y flechas pequenas a la derecha ----
+    // ---- pie: pista a la izquierda y flechas a la derecha ----
     {
         char hint[128];
         if (!status.empty()) snprintf(hint, sizeof hint, Loc(kText[g_lang][K_WAIT]).c_str(), StatusText(status).c_str());
@@ -633,21 +709,16 @@ static void BuildUI(float W, float H, float u) {
         ImGui::TextColored(status.empty() ? kGrey : ImVec4(1.0f, 0.70f, 0.25f, 1.0f), "%s", hint);
         ImGui::SetWindowFontScale(1.0f);
 
-        const float aw = 66.0f * u, lw = 100.0f * u, sp = ImGui::GetStyle().ItemSpacing.x;
+        const float aw = 74.0f * u, lw = 100.0f * u, sp = ImGui::GetStyle().ItemSpacing.x;
         const float x0 = pw - pad - aw * 2.0f - lw - sp * 2.0f;
         const bool multi = pages > 1;
-        ImGui::PushStyleColor(ImGuiCol_Button, pal.seg);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, pal.rowHover);
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, pal.rowActive);
-        ImGui::PushStyleColor(ImGuiCol_Text, multi ? kWhite : ImVec4(0.45f, 0.45f, 0.48f, 1.0f));
         ImGui::SetCursorPos(ImVec2(x0, footerTop));
-        if (ImGui::Button("<", ImVec2(aw, ah)) && multi) g_page = (g_page + pages - 1) % pages;
+        if (ArrowBtn("##prev", -1, aw, ah, multi, u, pal)) g_page = (g_page + pages - 1) % pages;
         ImGui::SetCursorPos(ImVec2(x0 + aw + lw + sp * 2.0f, footerTop));
-        if (ImGui::Button(">", ImVec2(aw, ah)) && multi) g_page = (g_page + 1) % pages;
-        ImGui::PopStyleColor(4);
+        if (ArrowBtn("##next", 1, aw, ah, multi, u, pal)) g_page = (g_page + 1) % pages;
 
         char pg[24];
-        snprintf(pg, sizeof pg, "%d/%d", g_page + 1, pages);
+        snprintf(pg, sizeof pg, "%d / %d", g_page + 1, pages);
         ImVec2 ts = ImGui::CalcTextSize(pg);
         ImGui::SetCursorPos(ImVec2(x0 + aw + sp + (lw - ts.x) * 0.5f, footerTop + (ah - ts.y) * 0.5f));
         ImGui::TextColored(kGrey, "%s", pg);
@@ -664,10 +735,10 @@ static EGLContext g_ctx = EGL_NO_CONTEXT;
 static std::chrono::steady_clock::time_point g_last;
 static EGLBoolean (*eglSwapBuffers_orig)(EGLDisplay, EGLSurface);
 
-static float UiScale(float H) { return kFontPx * (H / 1080.0f) * kSizeMul[g_size] / 30.0f; }
+static float UiScale(float H) { return kFontPx * (H / 1080.0f) * g_sizeMul / 30.0f; }
 
 static void ApplyStyle(float H) {
-    const float px = kFontPx * (H / 1080.0f) * kSizeMul[g_size];
+    const float px = kFontPx * (H / 1080.0f) * g_sizeMul;
     const float u = px / 30.0f;
     ImGuiIO& io = ImGui::GetIO();
     LoadFont(px);                                   // letra horneada al tamano real: nitida, sin escalar
@@ -870,9 +941,10 @@ extern "C" void OnModLoad() {
     if (files.empty()) files = kFilesDirs[0];
     g_plugDir = files + "/VestidorSA";
     mkdir(g_plugDir.c_str(), 0777);
-    FILE* lf = fopen((g_plugDir + "/menu_log.txt").c_str(), "w"); if (lf) fclose(lf);
+    vsa::g_dir = g_plugDir;
+    vsa::LogInit();                 // log.txt unico (lo comparte con el nucleo)
     LoadMenuSettings();
-    Log("== Vestidor SA Menu 3.0.0 cargado ==");
+    Log("== Vestidor SA Menu 4.0.0 cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
