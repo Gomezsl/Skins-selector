@@ -1,8 +1,8 @@
 LOCAL_PATH := $(call my-dir)
 
-# ---- nucleo: libVestidorSA64.so ----
+# ---- nucleo: libARCX64.so ----
 include $(CLEAR_VARS)
-LOCAL_MODULE := VestidorSA64
+LOCAL_MODULE := ARCX64
 LOCAL_SRC_FILES := SkinSelector.cpp AndroidModLoader/mod/config.cpp
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/AndroidModLoader $(LOCAL_PATH)
 LOCAL_CPPFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti
@@ -17,9 +17,9 @@ LOCAL_C_INCLUDES := $(LOCAL_PATH)/imgui $(LOCAL_PATH)/imgui/backends
 LOCAL_CPPFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti -fvisibility=hidden -DIMGUI_IMPL_OPENGL_ES2
 include $(BUILD_STATIC_LIBRARY)
 
-# ---- menu: libVestidorSAMenu64.so ----
+# ---- menu: libARCXMenu64.so ----
 include $(CLEAR_VARS)
-LOCAL_MODULE := VestidorSAMenu64
+LOCAL_MODULE := ARCXMenu64
 LOCAL_SRC_FILES := SkinSelectorMenu.cpp AndroidModLoader/mod/config.cpp
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/AndroidModLoader $(LOCAL_PATH)/imgui $(LOCAL_PATH)/imgui/backends $(LOCAL_PATH)
 LOCAL_CPPFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti

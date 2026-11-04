@@ -31,10 +31,10 @@
   #define HAVE_EMBEDDED_FONT 1
 #endif
 
-MYMODCFG(net.local.vestidorsamenu, Vestidor SA Menu, 4.0.0, Tu nombre)
+MYMODCFG(net.hunter09.arcxmenu, Project ARCX Menu, 4.1.0-beta, Hunter09)
 NEEDGAME(com.rockstargames.gtasa)
 
-#define TAG "VestidorSAMenu"
+#define TAG "ARCXMenu"
 
 // ---- rutas y log ---------------------------------------------------------------------------------
 static const char* kFilesDirs[] = {
@@ -43,7 +43,7 @@ static const char* kFilesDirs[] = {
     "/sdcard/Android/data/com.rockstargames.gtasa/files",
     "/storage/self/primary/Android/data/com.rockstargames.gtasa/files",
 };
-static std::string g_plugDir;   // .../files/VestidorSA
+static std::string g_plugDir;   // .../files/ARCX
 
 static void Log(const char* fmt, ...) {
     va_list ap;
@@ -108,13 +108,13 @@ static bool PatchGot(const char* libName, const char* sym, void* repl, void** or
     return scan(jmprel, jmpsz) || scan(rela, relasz);
 }
 
-// ---- lista de skins y estado (los escribe el nucleo en files/VestidorSA/: skins.ini, state.ini, VestidorSA.ini) ----
+// ---- lista de skins y estado (los escribe el nucleo en files/ARCX/: skins.ini, state.ini, ARCX.ini) ----
 static std::vector<std::string> g_skinsM;
 static std::string g_current = "CJ";
-static std::string g_title = "VESTIDOR SA";
+static std::string g_title = "PROJECT ARCX";
 static bool g_remember = false;
 static bool g_missions = true;        // opcion del nucleo: skin en misiones (activa por defecto)
-static bool g_vehicle = false;        // opcion del nucleo: cambiar dentro del vehiculo
+static bool g_vehicle = true;         // opcion del nucleo: cambiar dentro del vehiculo (activa por defecto)
 static std::string g_status;
 static time_t g_lastRead = 0;
 static std::mutex g_listMtx;
@@ -131,12 +131,12 @@ static void RefreshList() {
         if (!nm.empty()) skins.push_back(nm);
     }
     vsa::Ini st = vsa::IniRead(vsa::P("state.ini"));
-    vsa::Ini cf = vsa::IniRead(vsa::P("VestidorSA.ini"));
+    vsa::Ini cf = vsa::IniRead(vsa::P("ARCX.ini"));
     std::string cur = vsa::Get(st, "State", "current");
     std::string status = vsa::Get(st, "State", "status");
     bool rem = vsa::GetInt(cf, "General", "remember", 0) == 1;
     bool mis = vsa::GetInt(cf, "General", "missions", 1) == 1;
-    bool veh = vsa::GetInt(cf, "General", "vehicle", 0) == 1;
+    bool veh = vsa::GetInt(cf, "General", "vehicle", 1) == 1;
     std::string title = vsa::Get(cf, "General", "title");
     std::lock_guard<std::mutex> lk(g_listMtx);
     g_skinsM = skins;
@@ -193,7 +193,7 @@ static uintptr_t AND_TouchEvent_hook(int type, int idx, int x, int y) {
     return AND_TouchEvent_orig ? AND_TouchEvent_orig(type, idx, x, y) : 0;
 }
 
-// ---- ajustes propios del menu: VestidorSA.ini, seccion [Menu] ----------------------------------------
+// ---- ajustes propios del menu: ARCX.ini, seccion [Menu] ----------------------------------------
 static int g_theme = 0;                       // 0 por defecto, 1 rojo, 2 azul, 3 verde, 4 naranja
 static int g_lang = 0;                        // 0 espanol, 1 ingles, 2 indonesio
 static float g_sizeMul = 1.0f;                // tamano del menu
@@ -209,7 +209,7 @@ static const float kFontPx = 33.0f;           // letra a 1080p con tamano 100%
 static float Clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
 static void SaveMenuSettings() {
-    vsa::Ini ini = vsa::IniRead(vsa::P("VestidorSA.ini"));
+    vsa::Ini ini = vsa::IniRead(vsa::P("ARCX.ini"));
     auto& m = ini["Menu"];
     char b[32];
     m["theme"] = std::to_string(g_theme);
@@ -220,10 +220,10 @@ static void SaveMenuSettings() {
     snprintf(b, sizeof b, "%.4f", g_btnFx);    m["button_x"] = b;
     snprintf(b, sizeof b, "%.4f", g_btnFy);    m["button_y"] = b;
     m["button_lock"] = g_btnLock ? "1" : "0";
-    vsa::IniWrite(vsa::P("VestidorSA.ini"), ini);
+    vsa::IniWrite(vsa::P("ARCX.ini"), ini);
 }
 static void LoadMenuSettings() {
-    vsa::Ini ini = vsa::IniRead(vsa::P("VestidorSA.ini"));
+    vsa::Ini ini = vsa::IniRead(vsa::P("ARCX.ini"));
     if (ini.find("Menu") == ini.end()) return;
     int v;
     v = vsa::GetInt(ini, "Menu", "theme", 0);  if (v >= 0 && v < 5) g_theme = v;
@@ -611,11 +611,17 @@ static void BuildUI(float W, float H, float u) {
     ImGui::Begin("##vpanel", nullptr, fixed);
     const float pad = ImGui::GetStyle().WindowPadding.x;
 
-    // titulo y X
+    // titulo + credito y X
+    const float y0 = ImGui::GetCursorPosY();
     ImGui::TextColored(pal.title, "%s", title.c_str());
+    ImGui::SameLine(0.0f, 16.0f * u);
+    ImGui::SetCursorPosY(y0 + 9.0f * u);
+    ImGui::SetWindowFontScale(0.66f);
+    ImGui::TextColored(kGrey, "by Hunter09");
+    ImGui::SetWindowFontScale(1.0f);
     {
         float xw = 58.0f * u;
-        ImGui::SameLine(pw - xw - pad);
+        ImGui::SetCursorPos(ImVec2(pw - xw - pad, y0));
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.12f, 0.12f, 1.0f));
         if (ImGui::Button("X", ImVec2(xw, 0))) g_open = false;
         ImGui::PopStyleColor();
@@ -737,12 +743,14 @@ static EGLBoolean (*eglSwapBuffers_orig)(EGLDisplay, EGLSurface);
 
 static float UiScale(float H) { return kFontPx * (H / 1080.0f) * g_sizeMul / 30.0f; }
 
-static void ApplyStyle(float H) {
+// loadFont = true solo al iniciar: la fuente se hornea UNA vez al tamano maximo y despues solo se escala hacia abajo.
+// Cambiar el tamano en ejecucion ya no recrea la textura de la fuente (eso tocaba el estado de GL del juego).
+static void ApplyStyle(float H, bool loadFont) {
     const float px = kFontPx * (H / 1080.0f) * g_sizeMul;
     const float u = px / 30.0f;
     ImGuiIO& io = ImGui::GetIO();
-    LoadFont(px);                                   // letra horneada al tamano real: nitida, sin escalar
-    io.FontGlobalScale = g_hasTtf ? 1.0f : px / 13.0f;
+    if (loadFont) LoadFont(kFontPx * (H / 1080.0f) * kSizeHi);
+    io.FontGlobalScale = g_hasTtf ? g_sizeMul / kSizeHi : px / 13.0f;
     ImGuiStyle& st = ImGui::GetStyle();
     st = ImGuiStyle();
     ImGui::StyleColorsDark();
@@ -763,7 +771,7 @@ static bool InitImGui(float W, float H) {
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
-    ApplyStyle(H);
+    ApplyStyle(H, true);
     if (!ImGui_ImplOpenGL3_Init(nullptr)) { Log("ImGui_ImplOpenGL3_Init fallo"); return false; }
     Log("ImGui listo (%.0fx%.0f)", W, H);
     return true;
@@ -885,12 +893,7 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     while (glGetError() != GL_NO_ERROR) {}
 
-    if (g_styleDirty) {                 // cambio de tamano: se rehornea la fuente
-        ImGui_ImplOpenGL3_DestroyFontsTexture();
-        ApplyStyle((float)h);
-        ImGui_ImplOpenGL3_CreateFontsTexture();
-        g_styleDirty = false;
-    }
+    if (g_styleDirty) { ApplyStyle((float)h, false); g_styleDirty = false; }   // solo estilo y escala, sin GL
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
     BuildUI((float)w, (float)h, UiScale((float)h));
@@ -939,12 +942,12 @@ extern "C" void OnModLoad() {
         if (stat((std::string(d) + "/modloader").c_str(), &st) == 0) { files = d; break; }
     }
     if (files.empty()) files = kFilesDirs[0];
-    g_plugDir = files + "/VestidorSA";
+    g_plugDir = files + "/ARCX";
     mkdir(g_plugDir.c_str(), 0777);
     vsa::g_dir = g_plugDir;
     vsa::LogInit();                 // log.txt unico (lo comparte con el nucleo)
     LoadMenuSettings();
-    Log("== Vestidor SA Menu 4.0.0 cargado ==");
+    Log("== Project ARCX Menu 4.1.0-beta cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");

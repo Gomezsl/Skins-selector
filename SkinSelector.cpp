@@ -20,10 +20,10 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.local.vestidorsa, Vestidor SA, 2.0.0, Tu nombre)
+MYMODCFG(net.hunter09.arcx, Project ARCX, 2.1.0-beta, Hunter09)
 NEEDGAME(com.rockstargames.gtasa)
 
-#define TAG "VestidorSA"
+#define TAG "ARCX"
 
 // ---- rutas -------------------------------------------------------------------------------------
 // Carpeta "files" del juego. En algunos telefonos es Android_unprotected (asi lo muestra el log de ZyZ).
@@ -34,7 +34,7 @@ static const char* kFilesDirs[] = {
     "/storage/self/primary/Android/data/com.rockstargames.gtasa/files",
 };
 static std::string g_root;       // .../files/modloader
-static std::string g_plugDir;    // .../files/VestidorSA  (VestidorSA.ini, state.ini, skins.ini, request.ini, log.txt)
+static std::string g_plugDir;    // .../files/ARCX  (ARCX.ini, state.ini, skins.ini, request.ini, log.txt)
 
 static void Log(const char* fmt, ...) {
     va_list ap;
@@ -61,20 +61,22 @@ static void  (*CGame_ShutRestart_orig)();
 
 static int g_slot = 9;          // slot de personaje especial (1 normal; 9 con "skin en misiones" para no chocar con los de las misiones)
 static bool g_missions = true;  // siempre activa por defecto: la skin se mantiene en misiones y solo se quita en cinematicas
-static std::string g_title = "VESTIDOR SA";   // nombre del menu (editable en settings.txt: title=...) // opcion: mantener la skin tambien durante las misiones
+static std::string g_title = "PROJECT ARCX";   // nombre del menu (editable en settings.txt: title=...) // opcion: mantener la skin tambien durante las misiones
 
 // ---- estado --------------------------------------------------------------------------------------
 static std::vector<skinscan::Skin> g_skins;
 static std::atomic<int> g_pending{-2};   // -2 nada, -1 volver a CJ, >=0 indice en g_skins
 static int g_frame = 0;
 static int g_curSkin = -1;                 // -1 = CJ, >=0 indice de la skin puesta
+static const volatile uint8_t* g_pauseUser = nullptr;   // CTimer::m_UserPause
+static const volatile uint8_t* g_pauseCode = nullptr;   // CTimer::m_CodePause
 static uint8_t* g_scriptSpace = nullptr;   // CTheScripts::ScriptSpace (para detectar misiones)
 static int g_prevMission = 0;
 static int g_missionLogs = 0;
 static const int kOnMissionVar = 408;      // $ONMISSION en 2.10 (lo dice el log de ZyZ)
 
 static int g_desired = -1;                 // skin que el jugador quiere llevar (-1 = CJ); sobrevive a cinematicas, misiones y guardados
-static bool g_vehicleSwap = false;         // opcion: cambiar de skin tambien dentro del vehiculo (el cuerpo queda de pie); por defecto espera a que salga
+static bool g_vehicleSwap = true;          // opcion: cambiar de skin tambien dentro del vehiculo (como ARM Cheat Menu: sin DeleteRwObject); si no, espera a que salga
 static void (*FlushImmediately)(void*, bool);   // CPedIntelligence::FlushImmediately
 static bool g_remember = false;            // opcion "recordar": mantener la ultima skin entre partidas e inicios del juego
 static std::string g_lastName = "CJ";      // ultima skin elegida (se guarda en settings.txt)
@@ -101,23 +103,23 @@ static void WriteState() {          // state.ini: lo lee el menu (skin puesta y 
 }
 static void WriteCurrent(const char* name) { g_stateCur = name; WriteState(); }
 
-static void SaveSettings() {        // VestidorSA.ini, seccion [General] (el menu guarda la suya en [Menu])
-    vsa::Ini ini = vsa::IniRead(vsa::P("VestidorSA.ini"));
+static void SaveSettings() {        // ARCX.ini, seccion [General] (el menu guarda la suya en [Menu])
+    vsa::Ini ini = vsa::IniRead(vsa::P("ARCX.ini"));
     auto& g = ini["General"];
     g["remember"] = g_remember ? "1" : "0";
     g["missions"] = g_missions ? "1" : "0";
     g["vehicle"] = g_vehicleSwap ? "1" : "0";
     g["title"] = g_title;
     g["last"] = g_lastName;
-    vsa::IniWrite(vsa::P("VestidorSA.ini"), ini);
+    vsa::IniWrite(vsa::P("ARCX.ini"), ini);
 }
 static void LoadSettings() {
-    vsa::Ini ini = vsa::IniRead(vsa::P("VestidorSA.ini"));
+    vsa::Ini ini = vsa::IniRead(vsa::P("ARCX.ini"));
     if (ini.find("General") == ini.end()) return;
     g_remember = vsa::GetInt(ini, "General", "remember", 0) == 1;
     g_missions = vsa::GetInt(ini, "General", "missions", 1) == 1;
     g_slot = g_missions ? 9 : 1;
-    g_vehicleSwap = vsa::GetInt(ini, "General", "vehicle", 0) == 1;
+    g_vehicleSwap = vsa::GetInt(ini, "General", "vehicle", 1) == 1;
     std::string t = vsa::Get(ini, "General", "title");
     if (!t.empty()) g_title = t;
     std::string l = vsa::Get(ini, "General", "last");
@@ -279,7 +281,7 @@ static bool ApplySkin(int idx, bool force = false) {
     if (!ped) return false;                       // aun no hay jugador (menu / carga): se reintenta
     if (idx < 0) {                                // volver a CJ
         PrepareForModelChange(ped);
-        if (DeleteRwObject) DeleteRwObject(ped);
+        if (DeleteRwObject && !InVehicle()) DeleteRwObject(ped);
         SetModelIndex(ped, 0);
         if (RebuildPlayer) RebuildPlayer(ped, false);
         if (g_miOff >= 0 && ReadPedModel(ped) != 0) { LOGI("  calibracion del modelo invalida (leo %d con CJ)", ReadPedModel(ped)); g_miOff = -1; }
@@ -345,7 +347,8 @@ static bool ApplySkin(int idx, bool force = false) {
         }
     }
     PrepareForModelChange(ped);
-    if (DeleteRwObject && !g_noDelete.load()) { LOGI("  DeleteRwObject(ped=%p)", ped); DeleteRwObject(ped); }
+    if (InVehicle()) LOGI("  en vehiculo: se cambia el modelo sin DeleteRwObject (como ARM Cheat Menu)");
+    else if (DeleteRwObject && !g_noDelete.load()) { LOGI("  DeleteRwObject(ped=%p)", ped); DeleteRwObject(ped); }
     LOGI("  SetModelIndex(ped=%p, modelo=%u)", ped, modelId);
     SetModelIndex(ped, modelId);
     LOGI("  SetModelIndex termino sin crash");
@@ -493,6 +496,9 @@ static void Watchdog() {
         g_prevMission = om;
     }
 
+    // en pausa (menu, mapa, guardar partida) no se toca el modelo: se espera a que se reanude
+    if ((g_pauseUser && *g_pauseUser) || (g_pauseCode && *g_pauseCode)) return;
+
     // peticiones explicitas: esperan a que acabe la cinematica o la carga, y a que el jugador este libre
     int p = g_pending.load();
     if (p != -2 && !cut && !loading) {
@@ -587,7 +593,7 @@ extern "C" void OnModLoad() {
     }
     if (files.empty()) files = kFilesDirs[0];
     g_root = files + "/modloader";
-    g_plugDir = files + "/VestidorSA";
+    g_plugDir = files + "/ARCX";
     mkdir(g_plugDir.c_str(), 0777);
     vsa::g_dir = g_plugDir;
     vsa::LogInit();                 // log.txt unico: se reinicia una vez por sesion
@@ -602,7 +608,7 @@ extern "C" void OnModLoad() {
     }
     LoadSettings();
     WriteCurrent("CJ");   // proceso nuevo = CJ (state.ini); con "recordar" se actualiza al reaplicar
-    LOGI("== Vestidor SA 2.0.0 cargado (OnModLoad) ==");
+    LOGI("== Project ARCX 2.1.0-beta cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
@@ -621,6 +627,9 @@ extern "C" void OnModLoad() {
     SYM(GetModelInfoByName,             "_ZN10CModelInfo12GetModelInfoEPKcPi");
     *(void**)&ClearTaskDuckSecondary = (void*)aml->GetSym(h, "_ZN16CPedIntelligence22ClearTaskDuckSecondaryEv");
     LOGI("  %s CPedIntelligence::ClearTaskDuckSecondary", ClearTaskDuckSecondary ? "ok" : "FALTA");
+    g_pauseUser = (const volatile uint8_t*)aml->GetSym(h, "_ZN6CTimer11m_UserPauseE");
+    g_pauseCode = (const volatile uint8_t*)aml->GetSym(h, "_ZN6CTimer11m_CodePauseE");
+    LOGI("  %s CTimer::m_UserPause, %s CTimer::m_CodePause", g_pauseUser ? "ok" : "FALTA", g_pauseCode ? "ok" : "FALTA");
     g_scriptSpace = (uint8_t*)aml->GetSym(h, "_ZN11CTheScripts11ScriptSpaceE");
     LOGI("  %s _ZN11CTheScripts11ScriptSpaceE", g_scriptSpace ? "ok     " : "FALTA  ");
     g_cutPtr = (const volatile uint8_t*)aml->GetSym(h, "_ZN12CCutsceneMgr10ms_runningE");
