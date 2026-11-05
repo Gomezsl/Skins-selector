@@ -20,7 +20,7 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.hunter09.arcx, Project ARCX, 2.1.0-beta, Hunter09)
+MYMODCFG(net.hunter09.arcx, Project ARCX, 2.2.0-beta, Hunter09)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "ARCX"
@@ -78,6 +78,8 @@ static const int kOnMissionVar = 408;      // $ONMISSION en 2.10 (lo dice el log
 static int g_desired = -1;                 // skin que el jugador quiere llevar (-1 = CJ); sobrevive a cinematicas, misiones y guardados
 static bool g_vehicleSwap = true;          // opcion: cambiar de skin tambien dentro del vehiculo (como ARM Cheat Menu: sin DeleteRwObject); si no, espera a que salga
 static void (*FlushImmediately)(void*, bool);   // CPedIntelligence::FlushImmediately
+static void (*AddInCarAnim)(const void*, void*, bool);   // CCarEnterExit::AddInCarAnim(const CVehicle&, CPed*, bool esConductor)
+static bool (*VehIsDriver)(const void*, const void*);    // CVehicle::IsDriver(const CPed*) const
 static bool g_remember = false;            // opcion "recordar": mantener la ultima skin entre partidas e inicios del juego
 static std::string g_lastName = "CJ";      // ultima skin elegida (se guarda en settings.txt)
 static bool g_needReapply = false;
@@ -222,6 +224,15 @@ static void WriteStatus(const std::string& st) {
 // CPedIntelligence = { CPed* m_pPed; CTaskManager { CTask* primarias[5]; CTask* secundarias[6]; CPed* m_pPed; } ... }
 static bool InVehicle() { return FindPlayerVehicle && FindPlayerVehicle(-1, false); }
 
+// SetModelIndex deja al ped con una animacion de estar de pie (CAnimManager::AddAnimation). Dentro de un vehiculo hay que volver a
+// ponerle la de sentado, como hace CTaskSimpleCarSetPedInAsDriver::ProcessPed (AddInCarAnim con true = conductor, false = pasajero).
+static void ReseatInVehicle(void* ped, void* veh) {
+    if (!veh || !AddInCarAnim) return;
+    bool drv = VehIsDriver ? VehIsDriver(veh, ped) : true;
+    AddInCarAnim(veh, ped, drv);
+    LOGI("  en vehiculo: animacion de sentado restaurada (%s)", drv ? "conductor" : "pasajero");
+}
+
 // solo tareas (agachado, peleando, saltando...); el vehiculo se trata aparte
 static bool PlayerBusy(void* ped, std::string* why) {
     void* in = FindIntelligence(ped);
@@ -280,9 +291,11 @@ static bool ApplySkin(int idx, bool force = false) {
     void* ped = FindPlayerPed(-1);
     if (!ped) return false;                       // aun no hay jugador (menu / carga): se reintenta
     if (idx < 0) {                                // volver a CJ
+        void* veh0 = InVehicle() ? FindPlayerVehicle(-1, false) : nullptr;
         PrepareForModelChange(ped);
-        if (DeleteRwObject && !InVehicle()) DeleteRwObject(ped);
+        if (DeleteRwObject) DeleteRwObject(ped);
         SetModelIndex(ped, 0);
+        ReseatInVehicle(ped, veh0);
         if (RebuildPlayer) RebuildPlayer(ped, false);
         if (g_miOff >= 0 && ReadPedModel(ped) != 0) { LOGI("  calibracion del modelo invalida (leo %d con CJ)", ReadPedModel(ped)); g_miOff = -1; }
         g_curSkin = -1;
@@ -347,11 +360,12 @@ static bool ApplySkin(int idx, bool force = false) {
         }
     }
     PrepareForModelChange(ped);
-    if (InVehicle()) LOGI("  en vehiculo: se cambia el modelo sin DeleteRwObject (como ARM Cheat Menu)");
-    else if (DeleteRwObject && !g_noDelete.load()) { LOGI("  DeleteRwObject(ped=%p)", ped); DeleteRwObject(ped); }
+    void* veh = InVehicle() ? FindPlayerVehicle(-1, false) : nullptr;
+    if (DeleteRwObject && !g_noDelete.load()) { LOGI("  DeleteRwObject(ped=%p)", ped); DeleteRwObject(ped); }
     LOGI("  SetModelIndex(ped=%p, modelo=%u)", ped, modelId);
     SetModelIndex(ped, modelId);
     LOGI("  SetModelIndex termino sin crash");
+    ReseatInVehicle(ped, veh);
     if (g_miOff >= 0 && ReadPedModel(ped) != (int)modelId) {
         LOGI("  calibracion del modelo invalida (leo %d, esperaba %u)", ReadPedModel(ped), modelId);
         g_miOff = -1;
@@ -608,7 +622,7 @@ extern "C" void OnModLoad() {
     }
     LoadSettings();
     WriteCurrent("CJ");   // proceso nuevo = CJ (state.ini); con "recordar" se actualiza al reaplicar
-    LOGI("== Project ARCX 2.1.0-beta cargado (OnModLoad) ==");
+    LOGI("== Project ARCX 2.2.0-beta cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
@@ -621,6 +635,8 @@ extern "C" void OnModLoad() {
     SYM(FindPlayerPed,                  "_Z13FindPlayerPedi");
     SYM(FindPlayerVehicle,              "_Z17FindPlayerVehicleib");   // opcional
     SYM(FlushImmediately,               "_ZN16CPedIntelligence16FlushImmediatelyEb");   // opcional
+    SYM(AddInCarAnim,                   "_ZN13CCarEnterExit12AddInCarAnimERK8CVehicleP4CPedb");   // opcional (animacion de sentado)
+    SYM(VehIsDriver,                    "_ZNK8CVehicle8IsDriverEPK4CPed");   // opcional
     SYM(SetModelIndex,                  "_ZN4CPed13SetModelIndexEj");
     SYM(DeleteRwObject,                 "_ZN7CEntity14DeleteRwObjectEv");   // opcional
     SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");  // opcional
