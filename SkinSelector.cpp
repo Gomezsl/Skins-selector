@@ -20,7 +20,7 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.hunter09.arcx, Project ARCX, 2.3.0-beta, Hunter09)
+MYMODCFG(net.hunter09.arcx, Project ARCX, 2.3.1-beta, Hunter09)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "ARCX"
@@ -237,8 +237,21 @@ static bool SeatedIn(void* veh, void* ped, bool* isDriver) {
 
 // SetModelIndex deja al ped con una animacion de estar de pie (CAnimManager::AddAnimation). Dentro de un vehiculo hay que volver a
 // ponerle la de sentado, como hace CTaskSimpleCarSetPedInAsDriver::ProcessPed (AddInCarAnim con true = conductor, false = pasajero).
+static void LogTaskState(void* ped, const char* ctx) {   // para ajustar la deteccion de subir/bajar: tareas del jugador al aplicar
+    static int n = 0;
+    if (n >= 10) return;
+    void* in = FindIntelligence(ped);
+    if (!in || !Readable(in, 8 * 13)) return;
+    uint64_t q[13];
+    memcpy(q, in, sizeof q);
+    n++;
+    LOGI("  tareas %s: primarias=%d%d%d%d%d secundarias=%d%d%d%d%d%d", ctx, q[1] != 0, q[2] != 0, q[3] != 0, q[4] != 0, q[5] != 0,
+         q[6] != 0, q[7] != 0, q[8] != 0, q[9] != 0, q[10] != 0, q[11] != 0);
+}
+
 static void ReseatInVehicle(void* ped, void* veh) {
     if (!veh || !AddInCarAnim) return;
+    LogTaskState(ped, "en vehiculo al aplicar");
     bool drv;
     if (!SeatedIn(veh, ped, &drv)) { LOGI("  el jugador no va sentado (subiendo o bajando): no se restaura la animacion de sentado"); return; }
     AddInCarAnim(veh, ped, drv);
@@ -252,7 +265,7 @@ static bool PlayerBusy(void* ped, std::string* why) {
     uint64_t q[13];
     memcpy(q, in, sizeof q);
     bool layoutOk = ((q[12] & kPtrMask) == ((uintptr_t)ped & kPtrMask)) && q[5] != 0;   // m_pPed al final y tarea por defecto presente
-    if (g_layoutLogs < 6) {
+    if (g_layoutLogs < 24) {
         g_layoutLogs++;
         LOGI("  tareas: primarias=%d%d%d%d%d secundarias=%d%d%d%d%d%d diseno=%s", q[1] != 0, q[2] != 0, q[3] != 0, q[4] != 0,
              q[5] != 0, q[6] != 0, q[7] != 0, q[8] != 0, q[9] != 0, q[10] != 0, q[11] != 0, layoutOk ? "ok" : "NO COINCIDE");
@@ -271,6 +284,14 @@ static bool NeedWait(void* ped, std::string* why) {
     if (InVehicle()) {
         bool drv;
         if (!SeatedIn(FindPlayerVehicle(-1, false), ped, &drv)) { *why = "ocupado"; return true; }   // subiendo o bajando del coche
+        // al bajar, IsDriver sigue siendo true hasta que el ped sale del todo: la tarea de bajar/subir (primarias) lo delata
+        std::string tw;
+        if (PlayerBusy(ped, &tw)) {
+            static int vlog = 0;
+            if (vlog++ < 12) LOGI("  en vehiculo: tareas activas (%s): se espera", tw.c_str());
+            *why = (tw == "agachado") ? "ocupado" : tw;
+            return true;
+        }
         if (g_vehicleSwap) return false;
         *why = "en vehiculo";
         return true;
@@ -636,7 +657,7 @@ extern "C" void OnModLoad() {
     }
     LoadSettings();
     WriteCurrent("CJ");   // proceso nuevo = CJ (state.ini); con "recordar" se actualiza al reaplicar
-    LOGI("== Project ARCX 2.3.0-beta cargado (OnModLoad) ==");
+    LOGI("== Project ARCX 2.3.1-beta cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
