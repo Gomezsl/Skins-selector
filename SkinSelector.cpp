@@ -20,7 +20,7 @@
   #define HAVE_SAUTILS 1
 #endif
 
-MYMODCFG(net.hunter09.arcx, Project ARCX, 2.2.0-beta, Hunter09)
+MYMODCFG(net.hunter09.arcx, Project ARCX, 2.3.0-beta, Hunter09)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "ARCX"
@@ -80,6 +80,7 @@ static bool g_vehicleSwap = true;          // opcion: cambiar de skin tambien de
 static void (*FlushImmediately)(void*, bool);   // CPedIntelligence::FlushImmediately
 static void (*AddInCarAnim)(const void*, void*, bool);   // CCarEnterExit::AddInCarAnim(const CVehicle&, CPed*, bool esConductor)
 static bool (*VehIsDriver)(const void*, const void*);    // CVehicle::IsDriver(const CPed*) const
+static bool (*VehIsPassenger)(const void*, const void*); // CVehicle::IsPassenger(const CPed*) const
 static bool g_remember = false;            // opcion "recordar": mantener la ultima skin entre partidas e inicios del juego
 static std::string g_lastName = "CJ";      // ultima skin elegida (se guarda en settings.txt)
 static bool g_needReapply = false;
@@ -224,11 +225,22 @@ static void WriteStatus(const std::string& st) {
 // CPedIntelligence = { CPed* m_pPed; CTaskManager { CTask* primarias[5]; CTask* secundarias[6]; CPed* m_pPed; } ... }
 static bool InVehicle() { return FindPlayerVehicle && FindPlayerVehicle(-1, false); }
 
+// ¿va realmente sentado? Al subir o bajar FindPlayerVehicle ya (o aun) devuelve el coche, pero el ped no es conductor ni pasajero.
+static bool SeatedIn(void* veh, void* ped, bool* isDriver) {
+    *isDriver = true;
+    if (!veh || (!VehIsDriver && !VehIsPassenger)) return veh != nullptr;
+    bool d = VehIsDriver && VehIsDriver(veh, ped);
+    bool p = VehIsPassenger && VehIsPassenger(veh, ped);
+    *isDriver = d || !p;
+    return d || p;
+}
+
 // SetModelIndex deja al ped con una animacion de estar de pie (CAnimManager::AddAnimation). Dentro de un vehiculo hay que volver a
 // ponerle la de sentado, como hace CTaskSimpleCarSetPedInAsDriver::ProcessPed (AddInCarAnim con true = conductor, false = pasajero).
 static void ReseatInVehicle(void* ped, void* veh) {
     if (!veh || !AddInCarAnim) return;
-    bool drv = VehIsDriver ? VehIsDriver(veh, ped) : true;
+    bool drv;
+    if (!SeatedIn(veh, ped, &drv)) { LOGI("  el jugador no va sentado (subiendo o bajando): no se restaura la animacion de sentado"); return; }
     AddInCarAnim(veh, ped, drv);
     LOGI("  en vehiculo: animacion de sentado restaurada (%s)", drv ? "conductor" : "pasajero");
 }
@@ -257,6 +269,8 @@ static bool PlayerBusy(void* ped, std::string* why) {
 // en vehiculo se espera a que salga salvo que la opcion "cambiar dentro del vehiculo" este activa.
 static bool NeedWait(void* ped, std::string* why) {
     if (InVehicle()) {
+        bool drv;
+        if (!SeatedIn(FindPlayerVehicle(-1, false), ped, &drv)) { *why = "ocupado"; return true; }   // subiendo o bajando del coche
         if (g_vehicleSwap) return false;
         *why = "en vehiculo";
         return true;
@@ -622,7 +636,7 @@ extern "C" void OnModLoad() {
     }
     LoadSettings();
     WriteCurrent("CJ");   // proceso nuevo = CJ (state.ini); con "recordar" se actualiza al reaplicar
-    LOGI("== Project ARCX 2.2.0-beta cargado (OnModLoad) ==");
+    LOGI("== Project ARCX 2.3.0-beta cargado (OnModLoad) ==");
     LOGI("recordar ultima skin: %s, skin en misiones: %s (slot %d), ultima: %s", g_remember ? "SI" : "NO", g_missions ? "SI" : "NO", g_slot, g_lastName.c_str());
     LOGI("files: %s", files.c_str());
 
@@ -637,6 +651,7 @@ extern "C" void OnModLoad() {
     SYM(FlushImmediately,               "_ZN16CPedIntelligence16FlushImmediatelyEb");   // opcional
     SYM(AddInCarAnim,                   "_ZN13CCarEnterExit12AddInCarAnimERK8CVehicleP4CPedb");   // opcional (animacion de sentado)
     SYM(VehIsDriver,                    "_ZNK8CVehicle8IsDriverEPK4CPed");   // opcional
+    SYM(VehIsPassenger,                 "_ZNK8CVehicle11IsPassengerEPK4CPed");   // opcional
     SYM(SetModelIndex,                  "_ZN4CPed13SetModelIndexEj");
     SYM(DeleteRwObject,                 "_ZN7CEntity14DeleteRwObjectEv");   // opcional
     SYM(RebuildPlayer,                  "_ZN8CClothes13RebuildPlayerEP10CPlayerPedb");  // opcional

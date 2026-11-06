@@ -26,12 +26,16 @@
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 #include "vestidor_common.h"
+#if __has_include("arcx_logo.h")
+  #include "arcx_logo.h"       // logo redondo 128x128 RGBA embebido (boton que abre el menu)
+  #define HAVE_LOGO 1
+#endif
 #if __has_include("roboto_font.h")
   #include "roboto_font.h"     // lo genera el workflow: Roboto-Medium (de ImGui) con binary_to_compressed_c
   #define HAVE_EMBEDDED_FONT 1
 #endif
 
-MYMODCFG(net.hunter09.arcxmenu, Project ARCX Menu, 4.1.0-beta, Hunter09)
+MYMODCFG(net.hunter09.arcxmenu, Project ARCX Menu, 4.2.0-beta, Hunter09)
 NEEDGAME(com.rockstargames.gtasa)
 
 #define TAG "ARCXMenu"
@@ -191,6 +195,29 @@ static uintptr_t AND_TouchEvent_hook(int type, int idx, int x, int y) {
     }
     if (swallow) return 0;
     return AND_TouchEvent_orig ? AND_TouchEvent_orig(type, idx, x, y) : 0;
+}
+
+static GLuint g_logoTex = 0;
+
+// textura del logo: se crea una sola vez al iniciar (igual que la de la fuente de ImGui) y se restaura el binding que tenia el juego
+static void CreateLogoTexture() {
+#ifdef HAVE_LOGO
+    GLint last = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &last);
+    while (glGetError() != GL_NO_ERROR) {}
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, ARCX_LOGO_W, ARCX_LOGO_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, kArcxLogoRGBA);
+    glBindTexture(GL_TEXTURE_2D, (GLuint)last);
+    GLenum e = glGetError();
+    Log("logo: textura %u (%dx%d) error=0x%x", tex, ARCX_LOGO_W, ARCX_LOGO_H, (unsigned)e);
+    if (e == GL_NO_ERROR) g_logoTex = tex;
+#endif
 }
 
 // ---- ajustes propios del menu: ARCX.ini, seccion [Menu] ----------------------------------------
@@ -516,7 +543,9 @@ static void FloatingButton(float W, float H, float u, const std::string& title, 
     ImFont* fn = ImGui::GetFont();
     const float fs = ImGui::GetFontSize() * g_btnMul;
     ImVec2 ts = fn->CalcTextSizeA(fs, 100000.0f, 0.0f, title.c_str());
-    const float bw = ts.x + 124.0f * ub, bh = 88.0f * ub;
+    const bool useLogo = (g_logoTex != 0);
+    const float bw = useLogo ? 112.0f * ub : ts.x + 124.0f * ub;
+    const float bh = useLogo ? 112.0f * ub : 88.0f * ub;
     if (g_btnFx < 0.0f) g_btnFx = 0.0f;
     if (g_btnFy < 0.0f) g_btnFy = 0.0f;
     if (g_btnFx > 1.0f - bw / W) g_btnFx = 1.0f - bw / W;
@@ -547,6 +576,18 @@ static void FloatingButton(float W, float H, float u, const std::string& title, 
     const float r = 20.0f * ub, th3 = 3.0f * ub;
     const ImU32 acc = ImGui::GetColorU32(pal.accent);
     ImVec4 shadow = ImVec4(0.0f, 0.0f, 0.0f, 0.43f * g_alpha);
+    if (useLogo) {                                                     // logo redondo de ARCX
+        const ImVec2 c(p0.x + bw * 0.5f, p0.y + bh * 0.5f);
+        dl->AddCircleFilled(ImVec2(c.x + 3.0f * ub, c.y + 5.0f * ub), bw * 0.46f, ImGui::GetColorU32(shadow), 48);
+        const int a = (int)(255.0f * (active ? 1.0f : g_alpha));
+        dl->AddImage((ImTextureID)(uintptr_t)g_logoTex, p0, p1, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), IM_COL32(255, 255, 255, a));
+        if (active) dl->AddCircle(c, bw * 0.5f, acc, 48, th3);          // aro al pulsar
+        AddRect();
+        ImGui::End();
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar(2);
+        return;
+    }
     dl->AddRectFilled(ImVec2(p0.x + 4.0f * ub, p0.y + 6.0f * ub), ImVec2(p1.x + 4.0f * ub, p1.y + 6.0f * ub), ImGui::GetColorU32(shadow), r);
     dl->AddRectFilled(p0, p1, ImGui::GetColorU32(active ? pal.rowActive : pal.bg), r);
     dl->AddRect(p0, p1, acc, r, 0, th3);
@@ -815,6 +856,7 @@ static void DrawMenu(EGLDisplay dpy, EGLSurface surf) {
         g_inited = true;
         g_last = std::chrono::steady_clock::now();
         Log("VAO disponible: %s", g_bindVao ? "si" : "no");
+        CreateLogoTexture();
         LogGlState("inicio", ctx, w, h);
     }
     if (ctx != g_ctx) {
@@ -947,7 +989,7 @@ extern "C" void OnModLoad() {
     vsa::g_dir = g_plugDir;
     vsa::LogInit();                 // log.txt unico (lo comparte con el nucleo)
     LoadMenuSettings();
-    Log("== Project ARCX Menu 4.1.0-beta cargado ==");
+    Log("== Project ARCX Menu 4.2.0-beta cargado ==");
 
     void* h = aml->GetLibHandle("libGTASA.so");
     *(void**)&FindPlayerPed = (void*)aml->GetSym(h, "_Z13FindPlayerPedi");
