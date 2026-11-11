@@ -1,15 +1,6 @@
 LOCAL_PATH := $(call my-dir)
 
-# ---- nucleo: libARCX64.so ----
-include $(CLEAR_VARS)
-LOCAL_MODULE := ARCX64
-LOCAL_SRC_FILES := SkinSelector.cpp AndroidModLoader/mod/config.cpp
-LOCAL_C_INCLUDES := $(LOCAL_PATH)/AndroidModLoader $(LOCAL_PATH)
-LOCAL_CPPFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti
-LOCAL_LDLIBS := -llog -ldl
-include $(BUILD_SHARED_LIBRARY)
-
-# ---- Dear ImGui 1.89.7 (estatica, simbolos ocultos para no chocar con el ImGui de ZyZ) ----
+# ---- Dear ImGui 1.89.7 (estatica, simbolos ocultos para no chocar con el ImGui de ZyZ ni el de ARM Cheat Menu) ----
 include $(CLEAR_VARS)
 LOCAL_MODULE := imgui_es2
 LOCAL_SRC_FILES := imgui/imgui.cpp imgui/imgui_draw.cpp imgui/imgui_tables.cpp imgui/imgui_widgets.cpp imgui/imgui_demo.cpp imgui/backends/imgui_impl_opengl3.cpp
@@ -17,10 +8,10 @@ LOCAL_C_INCLUDES := $(LOCAL_PATH)/imgui $(LOCAL_PATH)/imgui/backends
 LOCAL_CPPFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti -fvisibility=hidden -DIMGUI_IMPL_OPENGL_ES2
 include $(BUILD_STATIC_LIBRARY)
 
-# ---- menu: libARCXMenu64.so ----
+# ---- Project ARCX: UN SOLO plugin (nucleo de skins + interfaz) -> libARCX64.so ----
 include $(CLEAR_VARS)
-LOCAL_MODULE := ARCXMenu64
-LOCAL_SRC_FILES := SkinSelectorMenu.cpp AndroidModLoader/mod/config.cpp
+LOCAL_MODULE := ARCX64
+LOCAL_SRC_FILES := ARCX.cpp AndroidModLoader/mod/config.cpp
 LOCAL_C_INCLUDES := $(LOCAL_PATH)/AndroidModLoader $(LOCAL_PATH)/imgui $(LOCAL_PATH)/imgui/backends $(LOCAL_PATH)
 LOCAL_CPPFLAGS := -std=c++17 -O2 -fno-exceptions -fno-rtti
 LOCAL_STATIC_LIBRARIES := imgui_es2
